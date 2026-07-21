@@ -1,0 +1,138 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --font-mono: ui-monospace, 'JetBrains Mono', 'Fira Code', monospace;
+    --color-canvas: var(--canvas);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar: var(--sidebar);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+    --radius-sm: calc(var(--radius) * 0.6);
+    --radius-md: calc(var(--radius) * 0.8);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) * 1.2);
+    --radius-2xl: calc(var(--radius) * 1.6);
+}
+
+:root {
+    color-scheme: light;
+    --canvas: oklch(0.965 0.003 240);
+    --background: oklch(0.995 0.002 240);
+    --foreground: oklch(0.19 0.008 240);
+    --card: oklch(1 0 0);
+    --card-foreground: var(--foreground);
+    --primary: oklch(0.61 0.14 225);
+    --primary-foreground: oklch(0.99 0 0);
+    --secondary: oklch(0.95 0.005 240);
+    --secondary-foreground: var(--foreground);
+    --muted: var(--secondary);
+    --muted-foreground: oklch(0.52 0.012 240);
+    --accent: var(--secondary);
+    --accent-foreground: var(--foreground);
+    --destructive: oklch(0.58 0.21 26);
+    --border: oklch(0.9 0.006 240);
+    --input: var(--border);
+    --ring: var(--primary);
+    --radius: 0.75rem;
+    --sidebar: oklch(0.975 0.004 240);
+    --sidebar-foreground: var(--foreground);
+    --sidebar-accent: oklch(0.93 0.009 240);
+    --sidebar-accent-foreground: var(--foreground);
+    --sidebar-border: var(--border);
+}
+
+.dark {
+    color-scheme: dark;
+    --canvas: oklch(0.16 0.006 240);
+    --background: oklch(0.19 0.006 240);
+    --foreground: oklch(0.94 0.004 240);
+    --card: oklch(0.225 0.007 240);
+    --card-foreground: var(--foreground);
+    --primary: oklch(0.71 0.13 225);
+    --primary-foreground: oklch(0.16 0.01 240);
+    --secondary: oklch(0.27 0.008 240);
+    --secondary-foreground: var(--foreground);
+    --muted: var(--secondary);
+    --muted-foreground: oklch(0.68 0.01 240);
+    --accent: var(--secondary);
+    --accent-foreground: var(--foreground);
+    --destructive: oklch(0.67 0.19 24);
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(1 0 0 / 14%);
+    --ring: var(--primary);
+    --sidebar: oklch(0.175 0.007 240);
+    --sidebar-foreground: var(--foreground);
+    --sidebar-accent: oklch(0.25 0.009 240);
+    --sidebar-accent-foreground: var(--foreground);
+    --sidebar-border: var(--border);
+}
+
+@layer base {
+    * {
+        @apply border-border outline-ring/50;
+    }
+
+    body {
+        @apply bg-background text-foreground font-sans antialiased;
+    }
+
+    button,
+    input {
+        @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40;
+    }
+
+    button {
+        cursor: pointer;
+    }
+}
+
+.range-control {
+    height: 4px;
+    appearance: none;
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--primary) 30%, var(--secondary));
+    cursor: pointer;
+}
+
+.range-control::-webkit-slider-thumb {
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 999px;
+    background: var(--primary);
+    border: 3px solid var(--background);
+    box-shadow: 0 0 0 1px var(--primary);
+}
+
+.range-control::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    border-radius: 999px;
+    background: var(--primary);
+    border: 3px solid var(--background);
+}
+
+.range-control:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
