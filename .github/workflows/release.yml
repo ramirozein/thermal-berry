@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   release:
@@ -33,10 +34,16 @@ jobs:
             patchelf \
             file
 
-      - name: Bump version
+      - name: Determine next version
         id: version
         run: |
-          CURRENT=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          git fetch --tags
+          LATEST_TAG="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
+          if [ -n "$LATEST_TAG" ]; then
+            CURRENT="${LATEST_TAG#v}"
+          else
+            CURRENT=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          fi
           IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
           NEXT="$MAJOR.$MINOR.$((PATCH + 1))"
           echo "version=$NEXT" >> "$GITHUB_OUTPUT"
@@ -67,15 +74,35 @@ jobs:
             done
           )
 
-      - name: Commit version bump and tag
+      - name: Commit version bump to a release branch
+        id: branch
         run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          BRANCH="release/v${VERSION}"
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
           git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.lock
-          git commit -m "chore: release v${{ steps.version.outputs.version }} [skip ci]"
-          git tag "v${{ steps.version.outputs.version }}"
-          git push origin HEAD:master
-          git push origin "v${{ steps.version.outputs.version }}"
+          git commit -m "chore: release v${VERSION} [skip ci]"
+          git push origin "$BRANCH"
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"
+
+      - name: Open release PR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          BRANCH="${{ steps.branch.outputs.name }}"
+          if ! gh pr view "$BRANCH" >/dev/null 2>&1; then
+            gh pr create \
+              --base master \
+              --head "$BRANCH" \
+              --title "chore: release v${VERSION} [skip ci]" \
+              --body "Automated version bump for v${VERSION}. The tag and GitHub release (with binaries) are already published from this branch; merging this PR just brings master's version files up to date."
+          fi
 
       - name: Publish GitHub release
         env:
