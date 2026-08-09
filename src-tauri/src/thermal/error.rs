@@ -27,6 +27,9 @@ pub enum ThermalError {
 
     #[error("database error: {0}")]
     Database(String),
+
+    #[error("network error: {0}")]
+    Network(String),
 }
 
 impl ThermalError {
@@ -50,6 +53,7 @@ impl ThermalError {
             ThermalError::InvalidValue(_) => "invalid_value",
             ThermalError::Io { .. } => "io",
             ThermalError::Database(_) => "database",
+            ThermalError::Network(_) => "network",
         }
     }
 }

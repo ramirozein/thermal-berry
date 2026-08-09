@@ -72,6 +72,13 @@ export interface DeviceInfo {
     availableVendors: string[];
 }
 
+export interface UpdateInfo {
+    available: boolean;
+    currentVersion: string;
+    latestVersion: string;
+    releaseUrl: string;
+}
+
 export interface ThermalError {
     kind:
         | "device_not_found"
@@ -79,7 +86,9 @@ export interface ThermalError {
         | "unsupported"
         | "permission_denied"
         | "invalid_value"
-        | "io";
+        | "io"
+        | "database"
+        | "network";
     message: string;
 }
 
@@ -105,6 +114,7 @@ export const selectVendor = (vendor: string) =>
     invoke<DeviceInfo>("select_vendor", {vendor});
 export const checkWriteAccess = () => invoke<boolean>("check_write_access");
 export const installUdevRule = () => invoke<void>("install_udev_rule");
+export const checkForUpdate = () => invoke<UpdateInfo>("check_for_update");
 
 export const listenTelemetry = (
     handler: (sample: Sample) => void,
