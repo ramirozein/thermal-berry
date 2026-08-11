@@ -116,7 +116,7 @@ export function Settings() {
                 {device && (
                     <div className="grid border-t border-border sm:grid-cols-3">
                         {[
-                            ["Fans detected", String(device.fans.length)],
+                            ["Fans", String(device.fans.length)],
                             ["Sensors", device.sensors.join(", ") || "0"],
                             [
                                 "Write permissions",
