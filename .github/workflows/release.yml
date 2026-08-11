@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    branches: [master]
+    branches: [ master ]
 
 permissions:
   contents: write
@@ -84,13 +84,20 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
-          git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.lock
-          git commit -m "chore: release v${VERSION} [skip ci]"
-          git push origin "$BRANCH"
+          git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.lock bun.lock
+          if git diff --cached --quiet; then
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+            echo "No version-file changes to commit; tagging current HEAD."
+          else
+            git commit -m "chore: release v${VERSION} [skip ci]"
+            git push origin "$BRANCH"
+            echo "committed=true" >> "$GITHUB_OUTPUT"
+          fi
           git tag "v${VERSION}"
           git push origin "v${VERSION}"
 
       - name: Open release PR
+        if: steps.branch.outputs.committed == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
