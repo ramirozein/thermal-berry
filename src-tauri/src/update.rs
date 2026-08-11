@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
+use tauri::AppHandle;
 
 use crate::thermal::ThermalError;
 
 type CmdResult<T> = Result<T, ThermalError>;
 
 const REPO: &str = "ramirozein/thermal-berry";
-const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,7 +23,8 @@ struct GithubRelease {
 }
 
 #[tauri::command]
-pub async fn check_for_update() -> CmdResult<UpdateInfo> {
+pub async fn check_for_update(app: AppHandle) -> CmdResult<UpdateInfo> {
+    let current_version = app.package_info().version.to_string();
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
     let client = reqwest::Client::builder()
         .user_agent("thermal-berry-update-checker")
@@ -43,14 +44,14 @@ pub async fn check_for_update() -> CmdResult<UpdateInfo> {
         .map_err(|e| ThermalError::Network(e.to_string()))?;
 
     let latest_version = release.tag_name.trim_start_matches('v').to_string();
-    let available = match (parse_version(&latest_version), parse_version(CURRENT_VERSION)) {
+    let available = match (parse_version(&latest_version), parse_version(&current_version)) {
         (Some(latest), Some(current)) => latest > current,
         _ => false,
     };
 
     Ok(UpdateInfo {
         available,
-        current_version: CURRENT_VERSION.to_string(),
+        current_version,
         latest_version,
         release_url: release.html_url,
     })

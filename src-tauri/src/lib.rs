@@ -30,6 +30,14 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // Autostart on login. On Linux this manages a .desktop file in
+        // ~/.config/autostart; the file's presence is the source of truth
+        // (see the get_autostart / set_autostart commands), so we don't
+        // duplicate the flag in Config.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(state.clone())
         .setup(move |app| {
             tray::setup(app.handle(), state.clone())?;
@@ -55,6 +63,8 @@ pub fn run() {
             commands::select_vendor,
             commands::check_write_access,
             commands::install_udev_rule,
+            commands::get_autostart,
+            commands::set_autostart,
             update::check_for_update,
         ])
         .build(tauri::generate_context!())

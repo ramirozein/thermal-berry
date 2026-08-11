@@ -1,22 +1,9 @@
 import {useMemo} from "react";
 
-/**
- * Minimalist SVG chart fed by the real telemetry history.
- * `series` is a list of values (oldest → most recent); gaps
- * (null) are skipped from the stroke.
- */
-export function LineChart({
-                              series,
-                              min,
-                              max,
-                              spanSecs,
-                              formatValue,
-                          }: {
+export function LineChart({series, min, max, spanSecs, formatValue,}: {
     series: (number | null)[];
-    /** Floor/ceiling of the Y axis; expand if the data exceeds them. */
     min: number;
     max: number;
-    /** Seconds covered by the full buffer, for the X axis labels. */
     spanSecs: number;
     formatValue?: (v: number) => string;
 }) {
@@ -30,7 +17,6 @@ export function LineChart({
         const lo = Math.min(min, ...values);
         const hi = Math.max(max, ...values);
         const range = hi - lo || 1;
-        // Partial buffer: the line grows from the left until it fills up.
         const n = series.length;
         const step = n > 1 ? W / (n - 1) : 0;
         let d = "";

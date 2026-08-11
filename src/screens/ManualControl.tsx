@@ -12,7 +12,7 @@ function FanControl({fan, disabled}: { fan: FanInfo; disabled: boolean }) {
     const [value, setValue] = useState(config?.manualBoosts[fan.id] ?? 0);
     const debounce = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-    // Syncs the slider if the mode changed from another screen (e.g. Reset).
+    // Syncs the slider if the mode changed from another screen
     const configPct = config?.mode === "manual" ? (config.manualBoosts[fan.id] ?? 0) : 0;
     const lastSynced = useRef(configPct);
     useEffect(() => {
@@ -109,9 +109,7 @@ export function ManualControl() {
                 <div className="flex items-start gap-3">
                     <Info className="mt-0.5 size-4 shrink-0 text-primary"/>
                     <p className="leading-relaxed">
-                        Boost is additive on top of the firmware's automatic curve: 0% leaves the EC in
-                        full control and 100% is maximum push. When the app closes, fans
-                        return to automatic mode.
+                        Boost adds on top of the automatic curve: 0% is full EC control, 100% is max.
                     </p>
                 </div>
             </div>

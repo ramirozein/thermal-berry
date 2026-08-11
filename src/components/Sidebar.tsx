@@ -12,7 +12,6 @@ import {openUrl} from "@tauri-apps/plugin-opener";
 import {cn} from "../lib/utils";
 import {useApp} from "../lib/app-context";
 import type {Screen} from "../App";
-import logo from "../assets/logo.png";
 
 const navItems = [
     {id: "dashboard" as const, label: "Overview", icon: Activity},
@@ -24,17 +23,14 @@ const navItems = [
 function BerryMark() {
     return (
         <img
-            src={logo}
+            src="/favicon.png"
             alt=""
             className="size-8 shrink-0 rounded-xl object-cover"
         />
     );
 }
 
-export function Sidebar({
-                            screen,
-                            onNavigate,
-                        }: {
+export function Sidebar({screen, onNavigate,}: {
     screen: Screen;
     onNavigate: (screen: Screen) => void;
 }) {

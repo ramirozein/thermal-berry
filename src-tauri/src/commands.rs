@@ -125,8 +125,13 @@ pub fn set_fan_boost(
     fan.set_boost(curve::percent_to_boost(percent, fan.boost_range()))?;
     inner.config.mode = FanMode::Manual;
     inner.config.manual_boosts.insert(fan_id, percent);
+    // Tuning a single fan means fans are no longer all at the same boost, so
+    // the "boost all fans" switch no longer holds — clear it to keep the two
+    // states mutually exclusive.
+    inner.config.all_fans_boost.enabled = false;
     persist(&inner)?;
     tray::sync_mode(&app, FanMode::Manual);
+    tray::sync_all_fans_boost(&app, false);
     Ok(())
 }
 
@@ -212,6 +217,11 @@ pub fn apply_mode(state: &AppState, mode: FanMode) -> CmdResult<()> {
     }
     inner.curve_states.clear();
     inner.config.mode = mode;
+    // A mode switch and the "boost all fans" switch are mutually exclusive:
+    // enabling boost is the only thing that sets this flag (see
+    // apply_manual_boost_all, whose caller sets it right after), so any other
+    // mode change must clear it or the two would show as active at once.
+    inner.config.all_fans_boost.enabled = false;
     persist(&inner)
 }
 
@@ -219,6 +229,7 @@ pub fn apply_mode(state: &AppState, mode: FanMode) -> CmdResult<()> {
 pub fn set_mode(app: AppHandle, state: State<'_, Arc<AppState>>, mode: FanMode) -> CmdResult<()> {
     apply_mode(&state, mode)?;
     tray::sync_mode(&app, mode);
+    tray::sync_all_fans_boost(&app, false);
     Ok(())
 }
 
@@ -321,6 +332,29 @@ fn install_udev_rule_blocking() -> CmdResult<()> {
             path: UDEV_RULE_PATH.into(),
         })
     }
+}
+
+/// Whether the app is registered to launch on login. On Linux this reflects
+/// the presence of the autostart .desktop file, which the plugin owns.
+#[tauri::command]
+pub fn get_autostart(app: AppHandle) -> CmdResult<bool> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|e| ThermalError::InvalidValue(format!("autostart: {e}")))
+}
+
+/// Enables or disables launching the app on login.
+#[tauri::command]
+pub fn set_autostart(app: AppHandle, enabled: bool) -> CmdResult<()> {
+    use tauri_plugin_autostart::ManagerExt;
+    let manager = app.autolaunch();
+    let result = if enabled {
+        manager.enable()
+    } else {
+        manager.disable()
+    };
+    result.map_err(|e| ThermalError::InvalidValue(format!("autostart: {e}")))
 }
 
 fn persist(inner: &Inner) -> CmdResult<()> {

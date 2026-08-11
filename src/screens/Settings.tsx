@@ -1,16 +1,12 @@
 import {useEffect, useState} from "react";
 import {Laptop, ShieldCheck} from "lucide-react";
-import {Button, Card, PageHeader, Select, SettingRow, TextInput} from "../components/ui";
+import {Button, Card, PageHeader, Select, SettingRow, TextInput, Toggle} from "../components/ui";
 import {PermissionBanner} from "../components/PermissionBanner";
-import {selectVendor, isThermalError, type AllFansBoost} from "../lib/ipc";
+import {getAutostart, setAutostart, selectVendor, isThermalError, type AllFansBoost} from "../lib/ipc";
 import {useApp} from "../lib/app-context";
 import {cn} from "../lib/utils";
-import {version} from '../../package.json';
+import {getVersion} from "@tauri-apps/api/app";
 
-/**
- * The on/off switch itself lives in the tray menu (next to the fan mode
- * items), not here — this card only holds the percent it applies.
- */
 function AllFansBoostCard({allFansBoost, onLiveReapply, onPercentChange,}: {
     allFansBoost: AllFansBoost;
     onLiveReapply: (percent: number) => Promise<void>;
@@ -60,6 +56,27 @@ function AllFansBoostCard({allFansBoost, onLiveReapply, onPercentChange,}: {
 export function Settings() {
     const {config, device, deviceError, updateConfig, setAllFansBoost, refreshDevice} = useApp();
     const [vendorError, setVendorError] = useState<string | null>(null);
+    const [autostart, setAutostartState] = useState<boolean | null>(null);
+    const [autostartError, setAutostartError] = useState<string | null>(null);
+    const [version, setVersion] = useState("");
+
+    useEffect(() => {
+        getAutostart()
+            .then(setAutostartState)
+            .catch((e) => setAutostartError(isThermalError(e) ? e.message : String(e)));
+        void getVersion().then(setVersion);
+    }, []);
+
+    const toggleAutostart = async (on: boolean) => {
+        setAutostartError(null);
+        setAutostartState(on);
+        try {
+            await setAutostart(on);
+        } catch (e) {
+            setAutostartState(!on);
+            setAutostartError(isThermalError(e) ? e.message : String(e));
+        }
+    };
 
     const pickVendor = async (vendor: string) => {
         setVendorError(null);
@@ -91,14 +108,10 @@ export function Settings() {
                         </p>
                     </div>
                     <span className="flex items-center gap-2 text-xs text-muted-foreground">
-            <span
-                className={cn(
-                    "size-1.5 rounded-full",
-                    device ? "bg-primary" : "bg-destructive",
-                )}
-            />
+                        <span className=
+                                  {cn("size-1.5 rounded-full", device ? "bg-primary" : "bg-destructive")}/>
                         {device ? "Connected" : "Disconnected"}
-          </span>
+                    </span>
                 </div>
                 {device && (
                     <div className="grid border-t border-border sm:grid-cols-3">
@@ -209,6 +222,22 @@ export function Settings() {
                             ]}
                             onChange={(v) => void updateConfig({historyRetentionDays: Number(v)})}
                         />
+                    </SettingRow>
+                    <SettingRow
+                        title="Launch on startup"
+                        description="Start Thermal Berry automatically when you log in"
+                    >
+                        <div className="flex flex-col items-end gap-1">
+                            <Toggle
+                                label="Launch on startup"
+                                on={autostart ?? false}
+                                disabled={autostart === null}
+                                onChange={(on) => void toggleAutostart(on)}
+                            />
+                            {autostartError && (
+                                <p className="text-xs text-destructive">{autostartError}</p>
+                            )}
+                        </div>
                     </SettingRow>
                 </Card>
             )}

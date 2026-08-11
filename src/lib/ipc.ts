@@ -1,8 +1,6 @@
 import {invoke} from "@tauri-apps/api/core";
 import {listen, type UnlistenFn} from "@tauri-apps/api/event";
 
-// Mirror types of the Rust structs (serde rename_all = camelCase).
-
 /**
  * Auto always runs the curve engine; Manual applies a fixed % per fan;
  * Disabled hands every fan back to the EC and the app stops touching them
@@ -114,6 +112,10 @@ export const selectVendor = (vendor: string) =>
     invoke<DeviceInfo>("select_vendor", {vendor});
 export const checkWriteAccess = () => invoke<boolean>("check_write_access");
 export const installUdevRule = () => invoke<void>("install_udev_rule");
+/** Whether the app is registered to launch on login. */
+export const getAutostart = () => invoke<boolean>("get_autostart");
+export const setAutostart = (enabled: boolean) =>
+    invoke<void>("set_autostart", {enabled});
 export const checkForUpdate = () => invoke<UpdateInfo>("check_for_update");
 
 export const listenTelemetry = (

@@ -12,9 +12,7 @@ import type {Config, DeviceInfo, FanMode, TempUnit, UpdateInfo} from "./ipc";
 interface AppContextValue {
     config: Config | null;
     device: DeviceInfo | null;
-    /** null while loading; ThermalError if detection failed. */
     deviceError: ipc.ThermalError | null;
-    /** null until the startup check resolves, or if it fails (e.g. offline). */
     updateInfo: UpdateInfo | null;
     updateConfig: (patch: Partial<Config>) => Promise<void>;
     setMode: (mode: FanMode) => Promise<void>;
@@ -44,11 +42,9 @@ export function AppProvider({children}: { children: ReactNode }) {
     useEffect(() => {
         void ipc.getConfig().then(setConfigState);
         void refreshDevice();
-        // Best-effort: a failed check (e.g. offline) just leaves updateInfo null.
         ipc.checkForUpdate().then(setUpdateInfo).catch(() => setUpdateInfo(null));
     }, [refreshDevice]);
 
-    // Theme: applies the `dark` class on <html> based on config + OS preference.
     useEffect(() => {
         if (!config) return;
         const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -66,7 +62,7 @@ export function AppProvider({children}: { children: ReactNode }) {
         async (patch: Partial<Config>) => {
             if (!config) return;
             const next = {...config, ...patch};
-            setConfigState(next); // optimistic; the backend returns the persisted version
+            setConfigState(next);
             setConfigState(await ipc.setConfig(next));
         },
         [config],
