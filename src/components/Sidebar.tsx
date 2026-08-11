@@ -1,16 +1,17 @@
 import {
     Activity,
     CircleGauge,
+    Download,
     Laptop,
     Moon,
     Settings,
     SlidersHorizontal,
     Sun,
 } from "lucide-react";
+import {openUrl} from "@tauri-apps/plugin-opener";
 import {cn} from "../lib/utils";
 import {useApp} from "../lib/app-context";
 import type {Screen} from "../App";
-import logo from "../assets/logo.jpeg";
 
 const navItems = [
     {id: "dashboard" as const, label: "Overview", icon: Activity},
@@ -22,21 +23,18 @@ const navItems = [
 function BerryMark() {
     return (
         <img
-            src={logo}
+            src="/favicon.png"
             alt=""
-            className="size-8 shrink-0 rounded-xl object-cover dark:invert"
+            className="size-8 shrink-0 rounded-xl object-cover"
         />
     );
 }
 
-export function Sidebar({
-                            screen,
-                            onNavigate,
-                        }: {
+export function Sidebar({screen, onNavigate,}: {
     screen: Screen;
     onNavigate: (screen: Screen) => void;
 }) {
-    const {config, device, updateConfig} = useApp();
+    const {config, device, updateConfig, updateInfo} = useApp();
     const isDark =
         config?.theme === "dark" ||
         (config?.theme === "system" &&
@@ -71,6 +69,19 @@ export function Sidebar({
                 ))}
             </nav>
             <div className="border-t border-sidebar-border pt-4">
+                {updateInfo?.available && (
+                    <button
+                        type="button"
+                        onClick={() => void openUrl(updateInfo.releaseUrl)}
+                        title={`Update available: v${updateInfo.latestVersion}`}
+                        className="mb-1 flex h-10 w-full items-center gap-3 rounded-lg bg-primary/10 px-3 text-sm font-medium text-primary transition-colors hover:bg-primary/20"
+                    >
+                        <Download className="size-4 shrink-0"/>
+                        <span className="hidden md:inline">
+                            Update to v{updateInfo.latestVersion}
+                        </span>
+                    </button>
+                )}
                 <button
                     type="button"
                     onClick={() => void updateConfig({theme: isDark ? "light" : "dark"})}

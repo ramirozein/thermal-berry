@@ -7,13 +7,13 @@ import {
     type ReactNode,
 } from "react";
 import * as ipc from "./ipc";
-import type {Config, DeviceInfo, FanMode, TempUnit} from "./ipc";
+import type {Config, DeviceInfo, FanMode, TempUnit, UpdateInfo} from "./ipc";
 
 interface AppContextValue {
     config: Config | null;
     device: DeviceInfo | null;
-    /** null while loading; ThermalError if detection failed. */
     deviceError: ipc.ThermalError | null;
+    updateInfo: UpdateInfo | null;
     updateConfig: (patch: Partial<Config>) => Promise<void>;
     setMode: (mode: FanMode) => Promise<void>;
     setAllFansBoost: (enabled: boolean, percent: number) => Promise<void>;
@@ -26,6 +26,7 @@ export function AppProvider({children}: { children: ReactNode }) {
     const [config, setConfigState] = useState<Config | null>(null);
     const [device, setDevice] = useState<DeviceInfo | null>(null);
     const [deviceError, setDeviceError] = useState<ipc.ThermalError | null>(null);
+    const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
 
     const refreshDevice = useCallback(async () => {
         try {
@@ -41,9 +42,9 @@ export function AppProvider({children}: { children: ReactNode }) {
     useEffect(() => {
         void ipc.getConfig().then(setConfigState);
         void refreshDevice();
+        ipc.checkForUpdate().then(setUpdateInfo).catch(() => setUpdateInfo(null));
     }, [refreshDevice]);
 
-    // Theme: applies the `dark` class on <html> based on config + OS preference.
     useEffect(() => {
         if (!config) return;
         const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -61,7 +62,7 @@ export function AppProvider({children}: { children: ReactNode }) {
         async (patch: Partial<Config>) => {
             if (!config) return;
             const next = {...config, ...patch};
-            setConfigState(next); // optimistic; the backend returns the persisted version
+            setConfigState(next);
             setConfigState(await ipc.setConfig(next));
         },
         [config],
@@ -84,7 +85,16 @@ export function AppProvider({children}: { children: ReactNode }) {
 
     return (
         <AppContext.Provider
-            value={{config, device, deviceError, updateConfig, setMode, setAllFansBoost, refreshDevice}}
+            value={{
+                config,
+                device,
+                deviceError,
+                updateInfo,
+                updateConfig,
+                setMode,
+                setAllFansBoost,
+                refreshDevice,
+            }}
         >
             {children}
         </AppContext.Provider>

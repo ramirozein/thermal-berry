@@ -12,12 +12,10 @@ const TEMP_MAX = 100;
 const VIEW_W = 600;
 const VIEW_H = 280;
 
-const toX = (tempC: number) =>
-    ((tempC - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)) * VIEW_W;
+const toX = (tempC: number) => ((tempC - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)) * VIEW_W;
 const toY = (percent: number) => VIEW_H - (percent / 100) * VIEW_H;
 
-// Keeps a dragged point within its neighbors (so the curve stays
-// monotonic on X) and within [0, 100] on Y.
+// Keeps a dragged point within its neighbors (so the curve stays monotonic on X) and within [0, 100] on Y.
 function clampPoint(sorted: CurvePoint[], index: number, tempC: number, percent: number): CurvePoint {
     const lo = index > 0 ? sorted[index - 1].tempC + 1 : TEMP_MIN;
     const hi = index < sorted.length - 1 ? sorted[index + 1].tempC - 1 : TEMP_MAX;
@@ -27,11 +25,7 @@ function clampPoint(sorted: CurvePoint[], index: number, tempC: number, percent:
     };
 }
 
-function CurveGraph({
-                        points,
-                        onChange,
-                        disabled,
-                    }: {
+function CurveGraph({points, onChange, disabled,}: {
     points: CurvePoint[];
     onChange: (points: CurvePoint[]) => void;
     disabled: boolean;
@@ -60,8 +54,7 @@ function CurveGraph({
         const svg = svgRef.current;
         if (!svg) return;
         const rect = svg.getBoundingClientRect();
-        const tempC =
-            TEMP_MIN + ((clientX - rect.left) / rect.width) * (TEMP_MAX - TEMP_MIN);
+        const tempC = TEMP_MIN + ((clientX - rect.left) / rect.width) * (TEMP_MAX - TEMP_MIN);
         const percent = 100 - ((clientY - rect.top) / rect.height) * 100;
         const clamped = clampPoint(sorted, index, tempC, percent);
         onChange(sorted.map((p, i) => (i === index ? clamped : p)));
@@ -77,7 +70,6 @@ function CurveGraph({
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", onUp);
         };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [dragIndex, sorted]);
 
     return (

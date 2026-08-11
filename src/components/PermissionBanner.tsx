@@ -4,10 +4,6 @@ import {Button} from "./ui";
 import {installUdevRule, isThermalError} from "../lib/ipc";
 import {useApp} from "../lib/app-context";
 
-/**
- * Notice shown when fan_boost isn't writable: offers to install the udev
- * rule (a single password prompt via pkexec). Disappears once access is granted.
- */
 export function PermissionBanner() {
     const {device, refreshDevice} = useApp();
     const [installing, setInstalling] = useState(false);

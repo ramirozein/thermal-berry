@@ -1,6 +1,5 @@
 import type {CurvePoint} from "./ipc";
 
-/** Mirror of default_points() in src-tauri/src/curve.rs */
 export function defaultPoints(): CurvePoint[] {
     return [
         {tempC: 40, percent: 0},
@@ -11,7 +10,6 @@ export function defaultPoints(): CurvePoint[] {
     ];
 }
 
-/** Mirror of evaluate() in Rust: linear interpolation with saturation. */
 export function evaluate(points: CurvePoint[], tempC: number): number {
     if (points.length === 0) return 0;
     const sorted = [...points].sort((a, b) => a.tempC - b.tempC);

@@ -1,10 +1,10 @@
 # Thermal Berry
 
-Desktop app for monitoring and controlling fans/temperature on Alienware
-laptops on Linux, with an architecture designed for third parties to add
+Desktop app for monitoring and controlling fans/temperature on
+Linux laptops, with an architecture designed for third parties to add
 other vendors.
 
-- **Stack:** Tauri v2 · Rust · React + TypeScript
+- **Stack:** Tauri · Rust · React · TypeScript
 
 ## Contributing
 

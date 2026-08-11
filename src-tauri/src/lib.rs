@@ -6,6 +6,7 @@ pub mod monitor;
 pub mod state;
 pub mod thermal;
 pub mod tray;
+pub mod update;
 
 use std::sync::Arc;
 
@@ -16,8 +17,6 @@ use state::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // If the on-disk database can't be opened, fall back to an in-memory one:
-    // the app stays functional, just without persistence.
     let db = Db::open().unwrap_or_else(|e| {
         eprintln!("thermal-berry: could not open database ({e}), running in-memory");
         Db::open_in_memory().expect("in-memory sqlite always opens")
@@ -31,14 +30,20 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // Autostart on login. On Linux this manages a .desktop file in
+        // ~/.config/autostart; the file's presence is the source of truth
+        // (see the get_autostart / set_autostart commands), so we don't
+        // duplicate the flag in Config.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(state.clone())
         .setup(move |app| {
             tray::setup(app.handle(), state.clone())?;
             monitor::spawn(app.handle().clone(), state);
             Ok(())
         })
-        // Closing the window hides to the tray so monitoring/curve control
-        // keeps running in the background; Quit lives in the tray menu.
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
@@ -58,14 +63,15 @@ pub fn run() {
             commands::select_vendor,
             commands::check_write_access,
             commands::install_udev_rule,
+            commands::get_autostart,
+            commands::set_autostart,
+            update::check_for_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");
 
     app.run(|app_handle, event| {
         if let RunEvent::Exit = event {
-            // On exit, always return the fans to the EC's own automatic
-            // control: curve/manual mode only lives while the app is running.
             let state = app_handle.state::<Arc<AppState>>();
             let inner = state.lock();
             if let Some(device) = inner.device.as_ref() {

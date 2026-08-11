@@ -3,11 +3,9 @@ import {cn} from "../lib/utils";
 
 type ButtonVariant = "primary" | "outline" | "ghost";
 
-export function Button({
-                           variant = "primary",
-                           className,
-                           ...props
-                       }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant }) {
+export function Button({variant = "primary", className, ...props}: ButtonHTMLAttributes<HTMLButtonElement> & {
+    variant?: ButtonVariant
+}) {
     return (
         <button
             type="button"
@@ -23,12 +21,7 @@ export function Button({
     );
 }
 
-export function Toggle({
-                           on,
-                           onChange,
-                           disabled,
-                           label,
-                       }: {
+export function Toggle({on, onChange, disabled, label,}: {
     on: boolean;
     onChange: (on: boolean) => void;
     disabled?: boolean;
@@ -57,11 +50,7 @@ export function Toggle({
     );
 }
 
-export function PageHeader({
-                               title,
-                               subtitle,
-                               action,
-                           }: {
+export function PageHeader({title, subtitle, action,}: {
     title: string;
     subtitle: string;
     action?: ReactNode;
@@ -96,11 +85,7 @@ export function Card({className, children}: { className?: string; children: Reac
     );
 }
 
-export function SettingRow({
-                               title,
-                               description,
-                               children,
-                           }: {
+export function SettingRow({title, description, children,}: {
     title: string;
     description: string;
     children: ReactNode;
@@ -117,18 +102,7 @@ export function SettingRow({
     );
 }
 
-export function TextInput({
-                              value,
-                              onChange,
-                              onBlur,
-                              onFocus,
-                              onKeyDown,
-                              placeholder,
-                              label,
-                              type = "text",
-                              className,
-                              readOnly,
-                          }: {
+export function TextInput({value, onChange, onBlur, onFocus, onKeyDown, placeholder, label, type = "text", className, readOnly,}: {
     value: string;
     onChange: (value: string) => void;
     onBlur?: () => void;
@@ -159,12 +133,7 @@ export function TextInput({
     );
 }
 
-export function Select<T extends string>({
-                                             value,
-                                             options,
-                                             onChange,
-                                             label,
-                                         }: {
+export function Select<T extends string>({value, options, onChange, label,}: {
     value: T;
     options: { value: T; label: string }[];
     onChange: (value: T) => void;
