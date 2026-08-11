@@ -29,11 +29,10 @@ pub fn run() {
     let state = Arc::new(AppState::new(device, config, db));
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tray::show_main_window(app);
+        }))
         .plugin(tauri_plugin_opener::init())
-        // Autostart on login. On Linux this manages a .desktop file in
-        // ~/.config/autostart; the file's presence is the source of truth
-        // (see the get_autostart / set_autostart commands), so we don't
-        // duplicate the flag in Config.
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
