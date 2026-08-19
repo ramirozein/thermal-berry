@@ -1,7 +1,7 @@
 import type {ButtonHTMLAttributes, KeyboardEventHandler, ReactNode} from "react";
 import {cn} from "../lib/utils";
 
-type ButtonVariant = "primary" | "outline" | "ghost";
+type ButtonVariant = "primary" | "outline" | "ghost" | "destructive";
 
 export function Button({variant = "primary", className, ...props}: ButtonHTMLAttributes<HTMLButtonElement> & {
     variant?: ButtonVariant
@@ -14,6 +14,7 @@ export function Button({variant = "primary", className, ...props}: ButtonHTMLAtt
                 variant === "primary" && "bg-primary text-primary-foreground hover:bg-primary/90",
                 variant === "outline" && "border border-border bg-transparent hover:bg-secondary",
                 variant === "ghost" && "hover:bg-secondary",
+                variant === "destructive" && "bg-destructive text-destructive-foreground hover:bg-destructive/90",
                 className,
             )}
             {...props}
@@ -92,7 +93,7 @@ export function SettingRow({title, description, children,}: {
 }) {
     return (
         <div
-            className="flex min-h-16 items-center justify-between gap-6 border-t border-border px-5 py-4 first:border-t-0">
+            className="flex min-h-16 items-center justify-between gap-6 border-t border-border px-5 py-4">
             <div>
                 <p className="text-sm font-medium">{title}</p>
                 <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{description}</p>
