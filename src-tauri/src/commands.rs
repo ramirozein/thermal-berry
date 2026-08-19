@@ -12,7 +12,7 @@ use crate::tray;
 
 type CmdResult<T> = Result<T, ThermalError>;
 
-const UDEV_RULE_PATH: &str = "/etc/udev/rules.d/60-thermal-berry.rules";
+pub(crate) const UDEV_RULE_PATH: &str = "/etc/udev/rules.d/60-thermal-berry.rules";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

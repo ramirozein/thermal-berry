@@ -2,7 +2,7 @@ import {useEffect, useState} from "react";
 import {Laptop, ShieldCheck} from "lucide-react";
 import {Button, Card, PageHeader, Select, SettingRow, TextInput, Toggle} from "../components/ui";
 import {PermissionBanner} from "../components/PermissionBanner";
-import {getAutostart, setAutostart, selectVendor, isThermalError, type AllFansBoost} from "../lib/ipc";
+import {getAutostart, setAutostart, selectVendor, uninstallApp, isThermalError, type AllFansBoost} from "../lib/ipc";
 import {useApp} from "../lib/app-context";
 import {cn} from "../lib/utils";
 import {getVersion} from "@tauri-apps/api/app";
@@ -48,6 +48,86 @@ function AllFansBoostCard({allFansBoost, onLiveReapply, onPercentChange,}: {
             </SettingRow>
             {error && (
                 <div className="border-t border-border px-5 py-3 text-xs text-destructive">{error}</div>
+            )}
+        </Card>
+    );
+}
+
+const UNINSTALL_CONFIRM_PHRASE = "DELETE";
+
+function UninstallCard() {
+    const [open, setOpen] = useState(false);
+    const [confirmText, setConfirmText] = useState("");
+    const [pending, setPending] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    const closeDialog = () => {
+        setOpen(false);
+        setConfirmText("");
+        setError(null);
+    };
+
+    const runUninstall = async () => {
+        setPending(true);
+        setError(null);
+        try {
+            await uninstallApp();
+        } catch (e) {
+            setPending(false);
+            setError(isThermalError(e) ? e.message : String(e));
+        }
+    };
+
+    return (
+        <Card className="overflow-hidden border-destructive/40">
+            <div className="px-5 py-3 text-xs font-semibold text-destructive">DANGER ZONE</div>
+            <SettingRow
+                title="Uninstall Thermal Berry"
+                description="Removes the udev rule, the installed package, all saved settings and history, then closes the app. This cannot be undone."
+            >
+                <Button variant="destructive" onClick={() => setOpen(true)}>
+                    Uninstall…
+                </Button>
+            </SettingRow>
+
+            {open && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+                    <Card className="w-full max-w-sm">
+                        <div className="p-5">
+                            <h2 className="text-sm font-semibold text-destructive">Uninstall Thermal Berry?</h2>
+                            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                                This permanently deletes the udev rule, the installed package, the database
+                                (settings, curves, history) and the autostart entry, then closes the app.
+                                Nothing is kept.
+                            </p>
+                            <p className="mt-3 text-xs text-muted-foreground">
+                                Type <span
+                                className="font-mono font-semibold text-foreground">{UNINSTALL_CONFIRM_PHRASE}</span> to
+                                confirm.
+                            </p>
+                            <TextInput
+                                label="Confirm uninstall"
+                                value={confirmText}
+                                onChange={setConfirmText}
+                                placeholder={UNINSTALL_CONFIRM_PHRASE}
+                                className="mt-2 w-full text-left"
+                            />
+                            {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
+                            <div className="mt-4 flex justify-end gap-2">
+                                <Button variant="ghost" disabled={pending} onClick={closeDialog}>
+                                    Cancel
+                                </Button>
+                                <Button
+                                    variant="destructive"
+                                    disabled={confirmText !== UNINSTALL_CONFIRM_PHRASE || pending}
+                                    onClick={() => void runUninstall()}
+                                >
+                                    {pending ? "Uninstalling…" : "Uninstall permanently"}
+                                </Button>
+                            </div>
+                        </div>
+                    </Card>
+                </div>
             )}
         </Card>
     );
@@ -252,17 +332,14 @@ export function Settings() {
                 />
             )}
 
-            <Card className="overflow-hidden">
-                <SettingRow
-                    title="Thermal Berry"
-                    description={`Version ${version} · Open source`}
-                >
-          <span className="flex items-center gap-2 text-xs text-muted-foreground">
-            <ShieldCheck className="size-4 text-primary"/>
-            rzein
-          </span>
-                </SettingRow>
-            </Card>
+            <UninstallCard/>
+
+            <SettingRow title="Thermal Berry" description={`Version ${version} · Open source`}>
+                  <span className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <ShieldCheck className="size-4 text-primary"/>
+                    rzein
+                  </span>
+            </SettingRow>
         </div>
     );
 }

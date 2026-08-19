@@ -117,6 +117,8 @@ export const getAutostart = () => invoke<boolean>("get_autostart");
 export const setAutostart = (enabled: boolean) =>
     invoke<void>("set_autostart", {enabled});
 export const checkForUpdate = () => invoke<UpdateInfo>("check_for_update");
+/** On success the backend exits the app, so this only resolves on failure/cancel. */
+export const uninstallApp = () => invoke<void>("uninstall_app");
 
 export const listenTelemetry = (
     handler: (sample: Sample) => void,

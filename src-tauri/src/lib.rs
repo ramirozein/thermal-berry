@@ -6,6 +6,7 @@ pub mod monitor;
 pub mod state;
 pub mod thermal;
 pub mod tray;
+pub mod uninstall;
 pub mod update;
 
 use std::sync::Arc;
@@ -65,6 +66,7 @@ pub fn run() {
             commands::get_autostart,
             commands::set_autostart,
             update::check_for_update,
+            uninstall::uninstall_app,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");
