@@ -3,6 +3,17 @@ name: Release
 on:
   push:
     branches: [ master ]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version part to bump'
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
 permissions:
   contents: write
@@ -10,8 +21,9 @@ permissions:
 
 jobs:
   release:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    if: "github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -19,9 +31,22 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+
       - name: Install Linux build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -36,6 +61,8 @@ jobs:
 
       - name: Determine next version
         id: version
+        env:
+          BUMP_INPUT: ${{ github.event.inputs.bump }}
         run: |
           git fetch --tags
           LATEST_TAG="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
@@ -45,7 +72,13 @@ jobs:
             CURRENT=$(node -p "require('./src-tauri/tauri.conf.json').version")
           fi
           IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-          NEXT="$MAJOR.$MINOR.$((PATCH + 1))"
+
+          BUMP="${BUMP_INPUT:-patch}"
+          case "$BUMP" in
+            major) NEXT="$((MAJOR + 1)).0.0" ;;
+            minor) NEXT="$MAJOR.$((MINOR + 1)).0" ;;
+            *) NEXT="$MAJOR.$MINOR.$((PATCH + 1))" ;;
+          esac
           echo "version=$NEXT" >> "$GITHUB_OUTPUT"
 
           for f in package.json src-tauri/tauri.conf.json; do
