@@ -6,12 +6,42 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
-  release:
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+  check-version:
     runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      should_release: ${{ steps.check.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check version
+        id: check
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAURI_VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          if [ "$VERSION" != "$TAURI_VERSION" ]; then
+            echo "::error::package.json version ($VERSION) and src-tauri/tauri.conf.json version ($TAURI_VERSION) don't match. Bump both to the same value."
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          if git rev-parse "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "v$VERSION is already released; skipping."
+          else
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -19,9 +49,22 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+
       - name: Install Linux build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -33,29 +76,6 @@ jobs:
             libssl-dev \
             patchelf \
             file
-
-      - name: Determine next version
-        id: version
-        run: |
-          git fetch --tags
-          LATEST_TAG="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
-          if [ -n "$LATEST_TAG" ]; then
-            CURRENT="${LATEST_TAG#v}"
-          else
-            CURRENT=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          fi
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-          NEXT="$MAJOR.$MINOR.$((PATCH + 1))"
-          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
-
-          for f in package.json src-tauri/tauri.conf.json; do
-            node -e "
-              const fs = require('fs');
-              const json = JSON.parse(fs.readFileSync('$f', 'utf8'));
-              json.version = '$NEXT';
-              fs.writeFileSync('$f', JSON.stringify(json, null, 2) + '\n');
-            "
-          done
 
       - name: Install frontend dependencies
         run: bun install
@@ -74,50 +94,21 @@ jobs:
             done
           )
 
-      - name: Commit version bump to a release branch
-        id: branch
+      - name: Tag release commit
+        env:
+          VERSION: ${{ needs.check-version.outputs.version }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          BRANCH="release/v${VERSION}"
-          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$BRANCH"
-          git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.lock bun.lock
-          if git diff --cached --quiet; then
-            echo "committed=false" >> "$GITHUB_OUTPUT"
-            echo "No version-file changes to commit; tagging current HEAD."
-          else
-            git commit -m "chore: release v${VERSION} [skip ci]"
-            git push origin "$BRANCH"
-            echo "committed=true" >> "$GITHUB_OUTPUT"
-          fi
           git tag "v${VERSION}"
           git push origin "v${VERSION}"
-
-      - name: Open release PR
-        if: steps.branch.outputs.committed == 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          BRANCH="${{ steps.branch.outputs.name }}"
-          if ! gh pr view "$BRANCH" >/dev/null 2>&1; then
-            gh pr create \
-              --base master \
-              --head "$BRANCH" \
-              --title "chore: release v${VERSION} [skip ci]" \
-              --body "Automated version bump for v${VERSION}. The tag and GitHub release (with binaries) are already published from this branch; merging this PR just brings master's version files up to date."
-          fi
 
       - name: Publish GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.check-version.outputs.version }}
         run: |
           BUNDLE_DIR="src-tauri/target/release/bundle"
-          gh release create "v${{ steps.version.outputs.version }}" \
-            --title "v${{ steps.version.outputs.version }}" \
+          gh release create "v${VERSION}" \
+            --title "v${VERSION}" \
             --generate-notes \
             "$BUNDLE_DIR"/deb/*.deb \
             "$BUNDLE_DIR"/appimage/*.AppImage \
