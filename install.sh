@@ -75,20 +75,20 @@ download_file() {
 verify_checksum() {
     local file="$1"
     local name="$2"
-    local sums_file="$WORK_DIR/SHA256SUMS"
+    local sums_file="$WORK_DIR/SHA512SUMS"
     local sums_url expected actual
 
     if [[ ! -f "$sums_file" ]]; then
-        sums_url="$(asset_url 'SHA256SUMS$')" \
-            || die "No SHA256SUMS asset found in the latest release; refusing to install an unverified binary"
-        download_file "$sums_url" "$sums_file" "SHA256SUMS"
+        sums_url="$(asset_url 'SHA512SUMS$')" \
+            || die "No SHA512SUMS asset found in the latest release; refusing to install an unverified binary"
+        download_file "$sums_url" "$sums_file" "SHA512SUMS"
     fi
 
     expected="$(awk -v name="$name" '$2 == name { print $1; exit }' "$sums_file")"
     [[ -n "$expected" ]] \
-        || die "No checksum entry found for $name in SHA256SUMS"
+        || die "No checksum entry found for $name in SHA512SUMS"
 
-    actual="$(sha256sum "$file" | awk '{ print $1 }')" \
+    actual="$(sha512sum "$file" | awk '{ print $1 }')" \
         || die "Could not calculate the checksum for $name"
     [[ "$expected" == "$actual" ]] \
         || die "Checksum verification failed for $name (expected $expected, got $actual) - possible tampering, aborting"
@@ -160,7 +160,7 @@ main() {
     local package_url
 
     require_command curl
-    require_command sha256sum
+    require_command sha512sum
     require_command grep
     require_command sed
     require_command awk
