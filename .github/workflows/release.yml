@@ -88,9 +88,9 @@ jobs:
           BUNDLE_DIR="src-tauri/target/release/bundle"
           (
             cd "$BUNDLE_DIR"
-            : > SHA256SUMS
+            : > SHA512SUMS
             for f in deb/*.deb appimage/*.AppImage rpm/*.rpm; do
-              sha256sum "$f" | awk -v name="$(basename "$f")" '{print $1"  "name}' >> SHA256SUMS
+              sha512sum "$f" | awk -v name="$(basename "$f")" '{print $1"  "name}' >> SHA512SUMS
             done
           )
 
@@ -113,4 +113,4 @@ jobs:
             "$BUNDLE_DIR"/deb/*.deb \
             "$BUNDLE_DIR"/appimage/*.AppImage \
             "$BUNDLE_DIR"/rpm/*.rpm \
-            "$BUNDLE_DIR"/SHA256SUMS
+            "$BUNDLE_DIR"/SHA512SUMS
