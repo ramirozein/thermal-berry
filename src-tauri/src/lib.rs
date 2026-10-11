@@ -66,6 +66,7 @@ pub fn run() {
             commands::get_autostart,
             commands::set_autostart,
             update::check_for_update,
+            update::install_update,
             uninstall::uninstall_app,
         ])
         .build(tauri::generate_context!())

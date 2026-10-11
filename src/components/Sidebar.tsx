@@ -3,12 +3,14 @@ import {
     CircleGauge,
     Download,
     Laptop,
+    LoaderCircle,
     Moon,
     Settings,
     SlidersHorizontal,
     Sun,
 } from "lucide-react";
-import {openUrl} from "@tauri-apps/plugin-opener";
+import {useState} from "react";
+import {installUpdate, isThermalError} from "../lib/ipc";
 import {cn} from "../lib/utils";
 import {useApp} from "../lib/app-context";
 import type {Screen} from "../App";
@@ -35,6 +37,19 @@ export function Sidebar({screen, onNavigate,}: {
     onNavigate: (screen: Screen) => void;
 }) {
     const {config, device, updateConfig, updateInfo} = useApp();
+    const [updating, setUpdating] = useState(false);
+    const [updateError, setUpdateError] = useState<string | null>(null);
+    const handleUpdate = async () => {
+        if (updating) return;
+        setUpdating(true);
+        setUpdateError(null);
+        try {
+            await installUpdate();
+        } catch (error) {
+            setUpdateError(isThermalError(error) ? error.message : String(error));
+            setUpdating(false);
+        }
+    };
     const isDark =
         config?.theme === "dark" ||
         (config?.theme === "system" &&
@@ -72,15 +87,23 @@ export function Sidebar({screen, onNavigate,}: {
                 {updateInfo?.available && (
                     <button
                         type="button"
-                        onClick={() => void openUrl(updateInfo.releaseUrl)}
-                        title={`Update available: v${updateInfo.latestVersion}`}
-                        className="mb-1 flex h-10 w-full items-center gap-3 rounded-lg bg-primary/10 px-3 text-sm font-medium text-primary transition-colors hover:bg-primary/20"
+                        onClick={() => void handleUpdate()}
+                        disabled={updating}
+                        aria-label={updating ? "Downloading and installing update" : `Install v${updateInfo.latestVersion} and restart`}
+                        aria-busy={updating}
+                        title={updateError ?? (updating ? "Downloading and installing update…" : `Install v${updateInfo.latestVersion} and restart`)}
+                        className="mb-1 flex h-10 w-full items-center gap-3 rounded-lg bg-primary/10 px-3 text-sm font-medium text-primary transition-colors hover:bg-primary/20 disabled:cursor-wait disabled:opacity-60"
                     >
-                        <Download className="size-4 shrink-0"/>
+                        {updating ? <LoaderCircle className="size-4 shrink-0 animate-spin"/> : <Download className="size-4 shrink-0"/>}
                         <span className="hidden md:inline">
-                            Update to v{updateInfo.latestVersion}
+                            {updating ? "Updating…" : `Update to v${updateInfo.latestVersion}`}
                         </span>
                     </button>
+                )}
+                {updateError && (
+                    <p role="alert" className="mb-2 break-words text-xs text-destructive md:px-3">
+                        {updateError}
+                    </p>
                 )}
                 <button
                     type="button"
