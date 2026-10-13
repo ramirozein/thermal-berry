@@ -15,7 +15,6 @@ export interface CurvePoint {
     percent: number;
 }
 
-/** Switch that sets every fan to the same manual boost, or back to automatic. */
 export interface AllFansBoost {
     enabled: boolean;
     percent: number;
@@ -96,30 +95,20 @@ export function isThermalError(e: unknown): e is ThermalError {
 
 export const getDeviceInfo = () => invoke<DeviceInfo>("get_device_info");
 export const getHistory = () => invoke<Sample[]>("get_history");
-/** Historical telemetry from SQLite, beyond the in-RAM ring buffer. */
-export const getHistoryRange = (fromMs: number, toMs: number) =>
-    invoke<Sample[]>("get_history_range", {fromMs, toMs});
+export const getHistoryRange = (fromMs: number, toMs: number) => invoke<Sample[]>("get_history_range", {fromMs, toMs});
 export const getConfig = () => invoke<Config>("get_config");
 export const setConfig = (config: Config) => invoke<Config>("set_config", {config});
-export const setFanBoost = (fanId: string, percent: number) =>
-    invoke<void>("set_fan_boost", {fanId, percent});
-export const setAllFansBoost = (enabled: boolean, percent: number) =>
-    invoke<Config>("set_all_fans_boost", {enabled, percent});
+export const setFanBoost = (fanId: string, percent: number) => invoke<void>("set_fan_boost", {fanId, percent});
+export const setAllFansBoost = (enabled: boolean, percent: number) => invoke<Config>("set_all_fans_boost", {enabled, percent});
 export const setMode = (mode: FanMode) => invoke<void>("set_mode", {mode});
-export const saveCurve = (fanId: string, points: CurvePoint[]) =>
-    invoke<void>("save_curve", {fanId, points});
-export const selectVendor = (vendor: string) =>
-    invoke<DeviceInfo>("select_vendor", {vendor});
+export const saveCurve = (fanId: string, points: CurvePoint[]) => invoke<void>("save_curve", {fanId, points});
+export const selectVendor = (vendor: string) => invoke<DeviceInfo>("select_vendor", {vendor});
 export const checkWriteAccess = () => invoke<boolean>("check_write_access");
 export const installUdevRule = () => invoke<void>("install_udev_rule");
-/** Whether the app is registered to launch on login. */
 export const getAutostart = () => invoke<boolean>("get_autostart");
-export const setAutostart = (enabled: boolean) =>
-    invoke<void>("set_autostart", {enabled});
+export const setAutostart = (enabled: boolean) => invoke<void>("set_autostart", {enabled});
 export const checkForUpdate = () => invoke<UpdateInfo>("check_for_update");
-/** On success the backend exits the app, so this only resolves on failure/cancel. */
+export const installUpdate = () => invoke<void>("install_update");
 export const uninstallApp = () => invoke<void>("uninstall_app");
 
-export const listenTelemetry = (
-    handler: (sample: Sample) => void,
-): Promise<UnlistenFn> => listen<Sample>("telemetry", (event) => handler(event.payload));
+export const listenTelemetry = (handler: (sample: Sample) => void): Promise<UnlistenFn> => listen<Sample>("telemetry", (event) => handler(event.payload));
