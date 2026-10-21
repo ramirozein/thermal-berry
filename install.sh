@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Installs the latest Thermal Berry release from GitHub Releases.
-# Usage: curl -fsSL https://ramirozein.me/thermal-berry/install.sh | bash
 set -euo pipefail
 
 readonly REPO="ramirozein/thermal-berry"
@@ -10,17 +8,24 @@ readonly APP_DIR="$HOME/.local/share/applications"
 
 RELEASE_JSON=""
 WORK_DIR=""
+STAGED_APPIMAGE=""
+UPDATE_METHOD=""
+APPIMAGE_TARGET=""
+RELEASE_TAG=""
 
 log() {
     printf '\033[1;32m==>\033[0m %s\n' "$1"
 }
 
 die() {
-    printf '\033[1;31mError:\033[0m %s\n' "$1" >&2
+    printf 'Error: %s\n' "$1" >&2
     exit 1
 }
 
 cleanup() {
+    if [[ -n "$STAGED_APPIMAGE" ]]; then
+        rm -f -- "$STAGED_APPIMAGE"
+    fi
     if [[ -n "$WORK_DIR" ]]; then
         rm -rf -- "$WORK_DIR"
     fi
@@ -40,8 +45,12 @@ check_architecture() {
 }
 
 fetch_release() {
-    log "Fetching latest release info..."
-    RELEASE_JSON="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")" \
+    local endpoint="latest"
+    if [[ -n "$RELEASE_TAG" ]]; then
+        endpoint="tags/$RELEASE_TAG"
+    fi
+    log "Fetching release info..."
+    RELEASE_JSON="$(curl -fsSL --connect-timeout 15 --max-time 60 "https://api.github.com/repos/${REPO}/releases/$endpoint")" \
         || die "Could not reach the GitHub API"
 }
 
@@ -68,7 +77,7 @@ download_file() {
     local destination="$2"
     local description="$3"
 
-    curl -fsSL "$url" -o "$destination" \
+    curl -fsSL --connect-timeout 15 --max-time 600 "$url" -o "$destination" \
         || die "Could not download $description"
 }
 
@@ -112,16 +121,24 @@ install_deb() {
     local status
 
     download_and_verify "$url" "$package" ".deb package"
-    require_command sudo
     require_command dpkg-query
-    log "Installing (sudo required)..."
 
-    if ! sudo dpkg -i "$package"; then
+    if [[ "$UPDATE_METHOD" == "deb" ]]; then
+        require_command pkexec
         require_command apt-get
-        sudo apt-get install -f -y \
-            || die "Could not repair .deb package dependencies"
-        sudo dpkg -i "$package" \
-            || die "Could not install the .deb package after repairing dependencies"
+        log "Installing update (authorize in the system dialog)..."
+        pkexec "$(command -v apt-get)" install --yes "$package" \
+            || die "Update was cancelled or the package could not be installed"
+    else
+        require_command sudo
+        log "Installing (sudo required)..."
+        if ! sudo dpkg -i "$package"; then
+            require_command apt-get
+            sudo apt-get install -f -y \
+                || die "Could not repair .deb package dependencies"
+            sudo dpkg -i "$package" \
+                || die "Could not install the .deb package after repairing dependencies"
+        fi
     fi
 
     status="$(dpkg-query -W -f='${Status}' "$BIN_NAME" 2>/dev/null)" \
@@ -134,10 +151,22 @@ install_appimage() {
     local url="$1"
     local appimage="$WORK_DIR/$BIN_NAME.AppImage"
 
-    mkdir -p "$INSTALL_DIR" "$APP_DIR"
+    local destination="${APPIMAGE_TARGET:-$INSTALL_DIR/$BIN_NAME}"
+    local destination_dir
+    destination_dir="$(dirname -- "$destination")"
+
+    mkdir -p "$destination_dir"
+    [[ -w "$destination_dir" ]] || die "Cannot update AppImage: $destination_dir is not writable"
     download_and_verify "$url" "$appimage" "AppImage"
-    mv "$appimage" "$INSTALL_DIR/$BIN_NAME"
-    chmod +x "$INSTALL_DIR/$BIN_NAME"
+    STAGED_APPIMAGE="$(mktemp "$destination_dir/.thermal-berry-update.XXXXXX")"
+    cp -- "$appimage" "$STAGED_APPIMAGE"
+    chmod 755 "$STAGED_APPIMAGE"
+    mv -f -- "$STAGED_APPIMAGE" "$destination"
+    STAGED_APPIMAGE=""
+
+    [[ "$UPDATE_METHOD" == "appimage" ]] && return 0
+
+    mkdir -p "$APP_DIR"
 
     cat > "$APP_DIR/${BIN_NAME}.desktop" <<EOF
 [Desktop Entry]
@@ -159,6 +188,26 @@ EOF
 main() {
     local package_url
 
+    case "${1:-}" in
+        --update-deb)
+            [[ $# -eq 2 ]] || die "Usage: --update-deb RELEASE_TAG"
+            UPDATE_METHOD="deb"
+            RELEASE_TAG="$2"
+            ;;
+        --update-appimage)
+            [[ $# -eq 3 ]] || die "Usage: --update-appimage PATH RELEASE_TAG"
+            UPDATE_METHOD="appimage"
+            APPIMAGE_TARGET="$(readlink -f -- "$2")"
+            [[ -f "$APPIMAGE_TARGET" ]] || die "Installed AppImage not found: $2"
+            RELEASE_TAG="$3"
+            ;;
+        "") ;;
+        *) die "Unknown argument: $1" ;;
+    esac
+    if [[ -n "$UPDATE_METHOD" ]]; then
+        [[ "$RELEASE_TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "Invalid release tag: $RELEASE_TAG"
+    fi
+
     require_command curl
     require_command sha512sum
     require_command grep
@@ -171,7 +220,15 @@ main() {
 
     fetch_release
 
-    if command -v dpkg >/dev/null 2>&1; then
+    if [[ "$UPDATE_METHOD" == "appimage" ]]; then
+        package_url="$(asset_url '\.AppImage$')" \
+            || die "No AppImage asset found for $RELEASE_TAG"
+        install_appimage "$package_url"
+    elif [[ "$UPDATE_METHOD" == "deb" ]]; then
+        package_url="$(asset_url 'amd64\.deb$')" \
+            || die "No .deb asset found for $RELEASE_TAG"
+        install_deb "$package_url"
+    elif command -v dpkg >/dev/null 2>&1; then
         if package_url="$(asset_url 'amd64\.deb$')"; then
             log "apt/dpkg detected, installing .deb package"
             install_deb "$package_url"
