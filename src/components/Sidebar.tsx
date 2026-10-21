@@ -18,7 +18,7 @@ import type {Screen} from "../App";
 const navItems = [
     {id: "dashboard" as const, label: "Overview", icon: Activity},
     {id: "manual" as const, label: "Manual Control", icon: SlidersHorizontal},
-    {id: "curve" as const, label: "Curves", icon: CircleGauge},
+    {id: "curve" as const, label: "Automatic Control", icon: CircleGauge},
     {id: "settings" as const, label: "Settings", icon: Settings},
 ];
 

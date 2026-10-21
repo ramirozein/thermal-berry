@@ -4,40 +4,37 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Emitter};
 
-use crate::config::FanMode;
+use crate::automatic::EMERGENCY_TEMP_C;
+use crate::config::{AutoStrategy, FanMode};
 use crate::curve;
 use crate::state::{AppState, FanReading, Sample, TempReading};
 use crate::tray;
 
 pub const TELEMETRY_EVENT: &str = "telemetry";
 
-/// How often old telemetry is purged from the database.
 const PURGE_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// Starts the monitoring thread: each tick reads sensors/fans, applies the
-/// curve if applicable, saves the sample in the ring buffer + database and
+/// selected automatic strategy, saves the sample in the ring buffer + database and
 /// emits it to the frontend. Once an hour it purges telemetry older than the
 /// configured retention.
-///
-/// The interval is re-read from config on each tick, so changes from
-/// Settings apply live; the sleep happens in 250ms slices so lowering the
-/// interval doesn't have to wait for the previous long sleep.
 pub fn spawn(app: AppHandle, state: Arc<AppState>) {
     thread::spawn(move || {
         let mut last_purge: Option<Instant> = None;
         let mut last_status = String::new();
+        let mut previous_tick = Instant::now();
         loop {
             let started = Instant::now();
             let interval = {
                 let inner = state.lock();
-                Duration::from_secs(inner.config.interval_secs())
+                Duration::from_secs(control_interval(&inner.config))
             };
 
-            // Catches panics from a single tick (e.g. an unexpected hwmon
-            // read) so this thread never dies silently: a dead monitor
-            // thread means both live telemetry and curve-based fan control
-            // stop with no indication to the user.
-            let tick_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tick(&state)));
+            let elapsed_secs = previous_tick.elapsed().as_secs_f32();
+            previous_tick = Instant::now();
+            let tick_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                tick(&state, elapsed_secs)
+            }));
             match tick_result {
                 Ok(Some(sample)) => {
                     if let Err(e) = app.emit(TELEMETRY_EVENT, &sample) {
@@ -63,14 +60,14 @@ pub fn spawn(app: AppHandle, state: Arc<AppState>) {
             if last_purge.is_none_or(|t| t.elapsed() >= PURGE_INTERVAL) {
                 last_purge = Some(Instant::now());
                 let inner = state.lock();
-                let retention_ms =
-                    inner.config.retention_days() as u64 * 24 * 3600 * 1000;
+                let retention_ms = inner.config.retention_days() as u64 * 24 * 3600 * 1000;
                 let now_ms = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                if let Err(e) =
-                    inner.db.purge_older_than(now_ms.saturating_sub(retention_ms))
+                if let Err(e) = inner
+                    .db
+                    .purge_older_than(now_ms.saturating_sub(retention_ms))
                 {
                     eprintln!("thermal-berry: error purging old telemetry: {e}");
                 }
@@ -79,10 +76,9 @@ pub fn spawn(app: AppHandle, state: Arc<AppState>) {
             while started.elapsed() < interval {
                 let remaining = interval.saturating_sub(started.elapsed());
                 thread::sleep(remaining.min(Duration::from_millis(250)));
-                // If the user lowered the interval, cut the sleep short.
                 let current = {
                     let inner = state.lock();
-                    Duration::from_secs(inner.config.interval_secs())
+                    Duration::from_secs(control_interval(&inner.config))
                 };
                 if started.elapsed() >= current {
                     break;
@@ -112,20 +108,35 @@ fn status_line(sample: &Sample) -> String {
     }
 }
 
-fn tick(state: &Arc<AppState>) -> Option<Sample> {
+fn control_interval(config: &crate::config::Config) -> u64 {
+    if config.mode == FanMode::Auto {
+        config.interval_secs().min(2)
+    } else {
+        config.interval_secs()
+    }
+}
+
+fn tick(state: &Arc<AppState>, elapsed_secs: f32) -> Option<Sample> {
     let mut inner = state.lock();
     let device = inner.device.as_ref()?;
 
-    let temps: Vec<TempReading> = device
+    // Retain failed positions so a missing CPU sensor cannot shift the GPU
+    // reading onto the wrong fan in the advanced curve strategy.
+    let readings: Vec<Option<TempReading>> = device
         .sensors()
         .iter()
-        .filter_map(|s| {
-            s.read_celsius().ok().map(|celsius| TempReading {
-                label: s.label().to_string(),
-                celsius,
-            })
+        .map(|s| {
+            s.read_celsius()
+                .ok()
+                .filter(|c| c.is_finite() && (0.0..=150.0).contains(c))
+                .map(|celsius| TempReading {
+                    label: s.label().to_string(),
+                    celsius,
+                })
         })
         .collect();
+    let missing_sensor = readings.is_empty() || readings.iter().any(Option::is_none);
+    let temps: Vec<TempReading> = readings.iter().flatten().cloned().collect();
 
     let fans = device.fans();
     let fan_readings: Vec<FanReading> = fans
@@ -143,23 +154,48 @@ fn tick(state: &Arc<AppState>) -> Option<Sample> {
         .collect();
 
     if inner.config.mode == FanMode::Auto {
-        // Reference temp per fan: the sensor at the same index if it exists
-        // (fan1↔temp1: CPU Fan↔CPU), otherwise the maximum temperature.
         let max_temp = temps.iter().map(|t| t.celsius).fold(f32::MIN, f32::max);
         for (i, fan) in fans.iter().enumerate() {
-            let temp = temps.get(i).map(|t| t.celsius).unwrap_or(max_temp);
-            if temp == f32::MIN {
-                continue; // no temperature readings this tick
-            }
-            let points = match inner.config.curves.get(fan.id()) {
-                Some(p) if !p.is_empty() => p.clone(),
-                _ => curve::default_points(),
+            let settings = inner.config.automatic_control;
+            let percent = if settings.strategy == AutoStrategy::Adaptive {
+                let current = fan_readings[i].boost_percent.unwrap_or(100);
+                inner
+                    .automatic_states
+                    .entry(fan.id().to_string())
+                    .or_default()
+                    .update(
+                        if missing_sensor { f32::NAN } else { max_temp },
+                        settings.target_temp_c,
+                        elapsed_secs,
+                        current,
+                    )
+            } else if missing_sensor || max_temp >= EMERGENCY_TEMP_C {
+                inner.curve_states.remove(fan.id());
+                100
+            } else {
+                let temp = readings
+                    .get(i)
+                    .and_then(Option::as_ref)
+                    .map(|t| t.celsius)
+                    .unwrap_or(max_temp);
+                let points = match inner.config.curves.get(fan.id()) {
+                    Some(p) if !p.is_empty() => p.clone(),
+                    _ => curve::default_points(),
+                };
+                inner
+                    .curve_states
+                    .entry(fan.id().to_string())
+                    .or_default()
+                    .update(&points, temp)
             };
-            let hysteresis = inner.curve_states.entry(fan.id().to_string()).or_default();
-            let percent = hysteresis.update(&points, temp);
             let boost = curve::percent_to_boost(percent, fan.boost_range());
             if let Err(e) = fan.set_boost(boost) {
-                eprintln!("thermal-berry: curve could not write {}: {e}", fan.id());
+                inner.automatic_states.remove(fan.id());
+                inner.curve_states.remove(fan.id());
+                eprintln!(
+                    "thermal-berry: automatic control could not write {}: {e}",
+                    fan.id()
+                );
             }
         }
     }
@@ -177,4 +213,171 @@ fn tick(state: &Arc<AppState>) -> Option<Sample> {
         eprintln!("thermal-berry: error persisting sample: {e}");
     }
     Some(sample)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::db::Db;
+    use crate::thermal::{Fan, Result, TempSensor, ThermalDevice, ThermalError};
+    use std::sync::Mutex;
+
+    struct TestFan(Arc<Mutex<Vec<u8>>>);
+
+    impl Fan for TestFan {
+        fn id(&self) -> &str {
+            "fan1"
+        }
+        fn label(&self) -> &str {
+            "Fan"
+        }
+        fn read_rpm(&self) -> Result<u32> {
+            Ok(2000)
+        }
+        fn read_boost(&self) -> Result<u8> {
+            Ok(20)
+        }
+        fn set_boost(&self, value: u8) -> Result<()> {
+            self.0.lock().unwrap().push(value);
+            Ok(())
+        }
+        fn boost_range(&self) -> (u8, u8) {
+            (0, 100)
+        }
+        fn is_writable(&self) -> bool {
+            true
+        }
+        fn max_rpm(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    struct TestSensor(Option<f32>);
+
+    impl TempSensor for TestSensor {
+        fn label(&self) -> &str {
+            "Sensor"
+        }
+        fn read_celsius(&self) -> Result<f32> {
+            self.0
+                .ok_or_else(|| ThermalError::InvalidValue("sensor unavailable".into()))
+        }
+    }
+
+    struct TestDevice {
+        temps: Vec<Option<f32>>,
+        writes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl ThermalDevice for TestDevice {
+        fn vendor_name(&self) -> &str {
+            "test"
+        }
+        fn driver_name(&self) -> &str {
+            "test"
+        }
+        fn model(&self) -> Option<String> {
+            None
+        }
+        fn fans(&self) -> Vec<Box<dyn Fan>> {
+            vec![Box::new(TestFan(self.writes.clone()))]
+        }
+        fn sensors(&self) -> Vec<Box<dyn TempSensor>> {
+            self.temps
+                .iter()
+                .map(|t| Box::new(TestSensor(*t)) as Box<dyn TempSensor>)
+                .collect()
+        }
+        fn supports_auto_curve(&self) -> bool {
+            true
+        }
+    }
+
+    fn test_state(temps: Vec<Option<f32>>, config: Config) -> (Arc<AppState>, Arc<Mutex<Vec<u8>>>) {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let device = TestDevice {
+            temps,
+            writes: writes.clone(),
+        };
+        (
+            Arc::new(AppState::new(
+                Some(Box::new(device)),
+                config,
+                Db::open_in_memory().unwrap(),
+            )),
+            writes,
+        )
+    }
+
+    #[test]
+    fn adaptive_uses_hottest_sensor_and_keeps_regulating() {
+        let (state, writes) = test_state(vec![Some(50.0), Some(78.0)], Config::default());
+        tick(&state, 2.0).unwrap();
+        tick(&state, 2.0).unwrap();
+        assert_eq!(*writes.lock().unwrap(), vec![26, 32]);
+    }
+
+    #[test]
+    fn missing_invalid_or_hot_sensor_requests_maximum_for_both_strategies() {
+        for strategy in [AutoStrategy::Adaptive, AutoStrategy::Curve] {
+            for temps in [
+                vec![],
+                vec![None, Some(40.0)],
+                vec![Some(f32::NAN)],
+                vec![Some(95.0)],
+            ] {
+                let mut config = Config::default();
+                config.automatic_control.strategy = strategy;
+                let (state, writes) = test_state(temps, config);
+                tick(&state, 2.0).unwrap();
+                assert_eq!(*writes.lock().unwrap(), vec![100]);
+            }
+        }
+    }
+
+    #[test]
+    fn curve_strategy_still_uses_saved_points() {
+        let mut config = Config::default();
+        config.automatic_control.strategy = AutoStrategy::Curve;
+        config.curves.insert(
+            "fan1".into(),
+            vec![
+                curve::CurvePoint {
+                    temp_c: 40.0,
+                    percent: 20,
+                },
+                curve::CurvePoint {
+                    temp_c: 80.0,
+                    percent: 60,
+                },
+            ],
+        );
+        let (state, writes) = test_state(vec![Some(60.0)], config);
+        tick(&state, 2.0).unwrap();
+        assert_eq!(*writes.lock().unwrap(), vec![40]);
+    }
+
+    #[test]
+    fn manual_and_disabled_never_apply_automatic_control() {
+        for mode in [FanMode::Manual, FanMode::Disabled] {
+            let mut config = Config::default();
+            config.mode = mode;
+            let (state, writes) = test_state(vec![Some(95.0)], config);
+            tick(&state, 2.0).unwrap();
+            assert!(writes.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn automatic_interval_is_bounded() {
+        let mut config = Config::default();
+        config.update_interval_secs = 60;
+        assert_eq!(control_interval(&config), 2);
+        config.update_interval_secs = 1;
+        assert_eq!(control_interval(&config), 1);
+        config.mode = FanMode::Manual;
+        config.update_interval_secs = 60;
+        assert_eq!(control_interval(&config), 60);
+    }
 }

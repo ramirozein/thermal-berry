@@ -32,9 +32,7 @@ pub struct DeviceInfo {
     pub fans: Vec<FanInfo>,
     pub sensors: Vec<String>,
     pub supports_auto_curve: bool,
-    /// true if all fans accept writes (udev rule installed).
     pub write_access: bool,
-    /// Vendors available for the manual fallback in Settings.
     pub available_vendors: Vec<String>,
 }
 
@@ -97,14 +95,38 @@ pub fn set_config(
     state: State<'_, Arc<AppState>>,
     config: Config,
 ) -> CmdResult<Config> {
+    if !config.automatic_control.is_valid() {
+        return Err(ThermalError::InvalidValue(
+            "target temperature must be between 50 and 85°C".into(),
+        ));
+    }
+    if config.curves.values().any(|points| {
+        points.len() < 2 || points.iter().any(|p| !p.temp_c.is_finite() || p.percent > 100)
+    }) {
+        return Err(ThermalError::InvalidValue(
+            "curves need at least two finite temperature points with boost between 0 and 100%".into(),
+        ));
+    }
+
     let mut inner = state.lock();
+    if config.mode != inner.config.mode {
+        return Err(ThermalError::InvalidValue(
+            "use set_mode to change fan mode".into(),
+        ));
+    }
+    inner.db.save_config(&config)?;
+    if config.automatic_control != inner.config.automatic_control
+        || config.curves != inner.config.curves
+    {
+        inner.automatic_states.clear();
+        inner.curve_states.clear();
+    }
     inner.config = config;
-    persist(&inner)?;
     tray::sync_mode(&app, inner.config.mode);
     Ok(inner.config.clone())
 }
 
-/// Sets the manual boost of a fan (0-100%). Changes the mode to Manual.
+/// Sets the manual boost of a fan (0-100%).
 #[tauri::command]
 pub fn set_fan_boost(
     app: AppHandle,
@@ -123,6 +145,8 @@ pub fn set_fan_boost(
         .find(|f| f.id() == fan_id)
         .ok_or_else(|| ThermalError::InvalidValue(format!("unknown fan: {fan_id}")))?;
     fan.set_boost(curve::percent_to_boost(percent, fan.boost_range()))?;
+    inner.curve_states.clear();
+    inner.automatic_states.clear();
     inner.config.mode = FanMode::Manual;
     inner.config.manual_boosts.insert(fan_id, percent);
     // Tuning a single fan means fans are no longer all at the same boost, so
@@ -149,13 +173,14 @@ pub fn apply_manual_boost_all(state: &AppState, percent: u8) -> CmdResult<()> {
         inner.config.manual_boosts.insert(fan.id().to_string(), percent);
     }
     inner.curve_states.clear();
+    inner.automatic_states.clear();
     inner.config.mode = FanMode::Manual;
     persist(&inner)
 }
 
 /// Toggles the "boost all fans" switch: turning it on applies `percent` to
 /// every fan (mode Manual); turning it off returns every fan to Auto mode
-/// (the curve engine). The switch state itself is persisted so both the
+/// (the selected automatic strategy). The switch state itself is persisted so both the
 /// tray menu and Settings reflect it after a restart. Shared by the
 /// `set_all_fans_boost` command (percent field in Settings) and the tray
 /// menu's toggle (which reuses the last saved percent).
@@ -192,8 +217,8 @@ pub fn apply_mode(state: &AppState, mode: FanMode) -> CmdResult<()> {
     let mut inner = state.lock();
     let device = inner.device.as_ref().ok_or(ThermalError::DeviceNotFound)?;
     match mode {
-        // Auto: the monitor loop applies the curve on each tick; here we
-        // just clear the hysteresis so the first tick applies immediately.
+        // Auto: the monitor applies the selected strategy on each tick.
+        // Clear controller state so it starts from the current fan boost.
         FanMode::Auto => {}
         // Manual: re-applies the last saved percentages.
         FanMode::Manual => {
@@ -216,6 +241,7 @@ pub fn apply_mode(state: &AppState, mode: FanMode) -> CmdResult<()> {
         }
     }
     inner.curve_states.clear();
+    inner.automatic_states.clear();
     inner.config.mode = mode;
     // A mode switch and the "boost all fans" switch are mutually exclusive:
     // enabling boost is the only thing that sets this flag (see
@@ -263,6 +289,8 @@ pub fn select_vendor(state: State<'_, Arc<AppState>>, vendor: String) -> CmdResu
     let device = thermal::create_device(&vendor)?;
     {
         let mut inner = state.lock();
+        inner.curve_states.clear();
+        inner.automatic_states.clear();
         inner.device = Some(device);
         inner.config.vendor_override = Some(vendor);
         persist(&inner)?;

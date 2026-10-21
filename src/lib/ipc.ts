@@ -2,9 +2,7 @@ import {invoke} from "@tauri-apps/api/core";
 import {listen, type UnlistenFn} from "@tauri-apps/api/event";
 
 /**
- * Auto always runs the curve engine; Manual applies a fixed % per fan;
- * Disabled hands every fan back to the EC and the app stops touching them
- * (only reachable from the tray menu's "Disable fan control").
+ * Auto regulates toward a target temperature or uses advanced curves.
  */
 export type FanMode = "auto" | "manual" | "disabled";
 export type TempUnit = "celsius" | "fahrenheit";
@@ -27,6 +25,10 @@ export interface Config {
     mode: FanMode;
     manualBoosts: Record<string, number>;
     curves: Record<string, CurvePoint[]>;
+    automaticControl: {
+        strategy: "adaptive" | "curve";
+        targetTempC: number;
+    };
     vendorOverride: string | null;
     historyRetentionDays: number;
     allFansBoost: AllFansBoost;

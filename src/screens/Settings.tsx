@@ -247,7 +247,7 @@ export function Settings() {
                     <div className="px-5 py-3 text-xs font-semibold text-muted-foreground">GENERAL</div>
                     <SettingRow
                         title="Telemetry interval"
-                        description="How often sensors and fans are refreshed"
+                        description="How often readings refresh. Automatic control uses at most 2 seconds for a prompt response."
                     >
                         <Select
                             label="Telemetry interval"

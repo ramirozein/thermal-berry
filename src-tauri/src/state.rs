@@ -3,12 +3,12 @@ use std::sync::{Mutex, MutexGuard};
 
 use serde::Serialize;
 
+use crate::automatic::AutomaticController;
 use crate::config::Config;
 use crate::curve::Hysteresis;
 use crate::db::Db;
 use crate::thermal::ThermalDevice;
 
-/// Samples retained in the ring buffer (~2 min with the default 2s interval).
 pub const HISTORY_CAPACITY: usize = 60;
 
 #[derive(Debug, Clone, Serialize)]
@@ -24,7 +24,6 @@ pub struct FanReading {
     pub id: String,
     pub label: String,
     pub rpm: Option<u32>,
-    /// Current boost expressed as 0-100.
     pub boost_percent: Option<u8>,
     pub max_rpm: Option<u32>,
 }
@@ -46,7 +45,7 @@ pub struct Inner {
     pub config: Config,
     pub db: Db,
     pub history: VecDeque<Sample>,
-    /// Hysteresis state per fan id, alive only while mode == Curve.
+    pub automatic_states: HashMap<String, AutomaticController>,
     pub curve_states: HashMap<String, Hysteresis>,
 }
 
@@ -59,16 +58,15 @@ impl AppState {
                 config,
                 history: VecDeque::with_capacity(HISTORY_CAPACITY),
                 curve_states: HashMap::new(),
+                automatic_states: HashMap::new(),
             }),
         }
     }
 
-    /// Locks the inner state, recovering from a poisoned mutex: a panic in
-    /// one thread (e.g. the monitor) must not cascade into every command and
-    /// the exit handler — worst case we see slightly stale data, and losing
-    /// the fan restore on exit would be the real integrity problem.
     pub fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 

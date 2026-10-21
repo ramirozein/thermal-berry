@@ -62,7 +62,6 @@ export function AppProvider({children}: { children: ReactNode }) {
         async (patch: Partial<Config>) => {
             if (!config) return;
             const next = {...config, ...patch};
-            setConfigState(next);
             setConfigState(await ipc.setConfig(next));
         },
         [config],

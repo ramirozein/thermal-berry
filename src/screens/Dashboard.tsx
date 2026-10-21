@@ -32,14 +32,15 @@ export function Dashboard() {
     const {history, latest} = useTelemetry();
     const {config, device} = useApp();
     const unit = config?.tempUnit ?? "celsius";
-    const intervalSecs = config?.updateIntervalSecs ?? 2;
+    const configuredInterval = config?.updateIntervalSecs ?? 2;
+    const intervalSecs = config?.mode === "auto" ? Math.min(configuredInterval, 2) : configuredInterval;
     const spanSecs = HISTORY_CAPACITY * intervalSecs;
 
     const tempValue = (celsius: number) => unit === "fahrenheit" ? Math.round(celsius * 1.8 + 32) : Math.round(celsius);
     const unitSuffix = unit === "fahrenheit" ? "°F" : "°C";
 
     const modeLabel = config?.mode === "manual" ? "Manual control"
-        : config?.mode === "disabled" ? "Fan control disabled" : "Automatic control";
+        : config?.mode === "disabled" ? "Fan control disabled" : config?.automaticControl.strategy === "curve" ? "Automatic curves" : "Target temperature control";
 
     const statusItems = [
         modeLabel,

@@ -1,7 +1,7 @@
 import {useEffect, useMemo, useRef, useState} from "react";
 import {Button, Card, PageHeader} from "../components/ui";
 import {PermissionBanner} from "../components/PermissionBanner";
-import {saveCurve, type CurvePoint} from "../lib/ipc";
+import {isThermalError, type CurvePoint} from "../lib/ipc";
 import {defaultPoints, evaluate} from "../lib/curve";
 import {formatTemp, useApp} from "../lib/app-context";
 import {useTelemetry} from "../lib/telemetry";
@@ -40,7 +40,6 @@ function CurveGraph({points, onChange, disabled,}: {
 
     const polyline = useMemo(() => {
         const inner = sorted.map((p) => `${toX(p.tempC)},${toY(p.percent)}`);
-        // Extends the flat curve to the edges of the domain.
         const first = sorted[0];
         const last = sorted[sorted.length - 1];
         return [
@@ -137,7 +136,7 @@ function CurveGraph({points, onChange, disabled,}: {
 }
 
 export function CurveEditor() {
-    const {config, device, setMode} = useApp();
+    const {config, device, setMode, updateConfig} = useApp();
     const {latest} = useTelemetry();
     const fans = device?.fans ?? [];
     const [fanId, setFanId] = useState<string | null>(null);
@@ -152,8 +151,16 @@ export function CurveEditor() {
     const [points, setPoints] = useState<CurvePoint[]>(savedPoints);
     const [dirty, setDirty] = useState(false);
     const [saving, setSaving] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [strategy, setStrategy] = useState<"adaptive" | "curve">("adaptive");
+    const [targetTempC, setTargetTempC] = useState(70);
+    useEffect(() => {
+        if (!config) return;
+        setStrategy(config.automaticControl.strategy);
+        setTargetTempC(config.automaticControl.targetTempC);
+    }, [config?.automaticControl]);
+    const settingsDirty = !!config && (strategy !== config.automaticControl.strategy || targetTempC !== config.automaticControl.targetTempC);
 
-    // When the fan changes (or config arrives), reload the saved points.
     useEffect(() => {
         setPoints(savedPoints);
         setDirty(false);
@@ -169,42 +176,50 @@ export function CurveEditor() {
             : null;
 
     const apply = async () => {
-        if (!activeFanId) return;
+        if (!config || (strategy === "curve" && !activeFanId)) return;
         setSaving(true);
+        setError(null);
         try {
-            await saveCurve(activeFanId, points);
+            await updateConfig({
+                automaticControl: {strategy, targetTempC},
+                ...(strategy === "curve" && activeFanId ? {curves: {...config.curves, [activeFanId]: points}} : {}),
+            });
             await setMode("auto");
             setDirty(false);
         } catch (e) {
-            console.error(e);
+            setError(isThermalError(e) ? e.message : String(e));
         } finally {
             setSaving(false);
         }
     };
 
-    const curveActive = config?.mode === "auto";
+    const controlActive = config?.mode === "auto" && config.automaticControl.strategy === strategy;
 
     return (
         <div className="flex flex-col gap-6">
             <PageHeader
-                title="Curves"
-                subtitle="Define what Auto mode does at each temperature"
+                title="Automatic Control"
+                subtitle="Choose how automatic cooling responds to heat"
                 action={
                     <div className="flex gap-2">
                         <Button
                             variant="outline"
-                            disabled={!dirty}
+                            disabled={saving || (!dirty && !settingsDirty)}
                             onClick={() => {
                                 setPoints(savedPoints);
                                 setDirty(false);
+                                if (config) {
+                                    setStrategy(config.automaticControl.strategy);
+                                    setTargetTempC(config.automaticControl.targetTempC);
+                                }
                             }}
                         >
                             Revert
                         </Button>
-                        <Button onClick={() => void apply()} disabled={saving || !activeFanId}>
+                        <Button onClick={() => void apply()} disabled={saving || !config || !activeFanId || !device?.writeAccess}>
                             {saving
                                 ? "Applying…"
-                                : curveActive && !dirty
+                                : controlActive && !dirty && !settingsDirty
                                     ? "Auto mode active"
                                     : "Apply to Auto mode"}
                         </Button>
@@ -212,53 +227,110 @@ export function CurveEditor() {
                 }
             />
             <PermissionBanner/>
-            {fans.length > 1 && (
-                <div className="flex items-center gap-1 self-start rounded-lg bg-secondary p-1">
-                    {fans.map((f) => (
-                        <button
-                            key={f.id}
-                            type="button"
-                            onClick={() => setFanId(f.id)}
-                            className={cn(
-                                "rounded-md px-3 py-1.5 text-xs font-medium",
-                                f.id === activeFanId ? "bg-background" : "text-muted-foreground",
-                            )}
-                        >
-                            {f.label}
-                        </button>
+            {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+            <Card className="flex flex-wrap items-center justify-between gap-4 p-5">
+                <div>
+                    <h2 className="text-sm font-semibold">Regulation method</h2>
+                    <p className="mt-1 text-xs text-muted-foreground">Target temperature is recommended. Saved curves remain available.</p>
+                </div>
+                <fieldset aria-label="Automatic regulation method" className="flex flex-wrap gap-1 rounded-lg bg-secondary p-1">
+                    {([
+                        {value: "adaptive", label: "Target temperature"},
+                        {value: "curve", label: "Advanced curves"},
+                    ] as const).map((option) => (
+                        <label key={option.value} className="cursor-pointer">
+                            <input
+                                type="radio"
+                                name="automatic-strategy"
+                                value={option.value}
+                                checked={strategy === option.value}
+                                onChange={() => setStrategy(option.value)}
+                                disabled={saving || !config}
+                                className="peer sr-only"
+                            />
+                            <span className="block rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors peer-checked:bg-background peer-checked:text-foreground peer-focus-visible:ring-2 peer-focus-visible:ring-ring/40 peer-disabled:opacity-50">
+                                {option.label}
+                            </span>
+                        </label>
                     ))}
-                </div>
-            )}
-            <Card className="p-6">
-                <div className="mb-8 flex items-start justify-between">
-                    <div>
-                        <h2 className="text-sm font-semibold">
-                            {fans.find((f) => f.id === activeFanId)?.label ?? "No fan"}
-                        </h2>
-                        <p className="mt-1 text-xs text-muted-foreground">
-                            Drag the points to adjust the response
-                        </p>
-                    </div>
-                    <div className="text-right">
-                        <p className="font-mono text-sm font-medium text-primary">
-                            {refTemp !== null && config
-                                ? `${formatTemp(refTemp, config.tempUnit)} → ${evaluate(points, refTemp)}%`
-                                : "—"}
-                        </p>
-                        <p className="mt-1 text-xs text-muted-foreground">Current response</p>
-                    </div>
-                </div>
-                <div className="ml-9 pb-7">
-                    <CurveGraph
-                        points={points}
-                        disabled={!device?.writeAccess}
-                        onChange={(next) => {
-                            setPoints(next);
-                            setDirty(true);
-                        }}
-                    />
-                </div>
+                </fieldset>
             </Card>
+            {strategy === "adaptive" ? (
+                <Card className="p-6">
+                    <div className="flex items-start justify-between gap-4">
+                        <div>
+                            <h2 className="text-sm font-semibold">Target temperature</h2>
+                            <p className="mt-1 max-w-lg text-xs leading-relaxed text-muted-foreground">
+                                Automatically adjusts fan boost to keep the system near your chosen temperature.
+                            </p>
+                        </div>
+                        <span className="shrink-0 font-mono text-lg text-primary">{formatTemp(targetTempC, config?.tempUnit ?? "celsius")}</span>
+                    </div>
+                    <input
+                        aria-label="Target temperature in Celsius"
+                        type="range"
+                        min="50"
+                        max="85"
+                        step="1"
+                        value={targetTempC}
+                        disabled={saving || !config}
+                        onChange={(e) => setTargetTempC(Number(e.target.value))}
+                        className="range-control mt-6 w-full"
+                    />
+                    <div className="mt-2 flex justify-between text-xs text-muted-foreground">
+                        <span>{formatTemp(50, config?.tempUnit ?? "celsius")} · More cooling</span>
+                        <span>{formatTemp(85, config?.tempUnit ?? "celsius")} · Less boost</span>
+                    </div>
+                </Card>
+            ) : <>
+                {fans.length > 1 && (
+                    <div className="flex items-center gap-1 self-start rounded-lg bg-secondary p-1">
+                        {fans.map((f) => (
+                            <button
+                                key={f.id}
+                                type="button"
+                                onClick={() => setFanId(f.id)}
+                                className={cn(
+                                    "rounded-md px-3 py-1.5 text-xs font-medium",
+                                    f.id === activeFanId ? "bg-background" : "text-muted-foreground",
+                                )}
+                            >
+                                {f.label}
+                            </button>
+                        ))}
+                    </div>
+                )}
+                <Card className="p-6">
+                    <div className="mb-8 flex items-start justify-between">
+                        <div>
+                            <h2 className="text-sm font-semibold">
+                                {fans.find((f) => f.id === activeFanId)?.label ?? "No fan"}
+                            </h2>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                                Drag the points to adjust the response
+                            </p>
+                        </div>
+                        <div className="text-right">
+                            <p className="font-mono text-sm font-medium text-primary">
+                                {refTemp !== null && config
+                                    ? `${formatTemp(refTemp, config.tempUnit)} → ${evaluate(points, refTemp)}%`
+                                    : "—"}
+                            </p>
+                            <p className="mt-1 text-xs text-muted-foreground">Current response</p>
+                        </div>
+                    </div>
+                    <div className="ml-9 pb-7">
+                        <CurveGraph
+                            points={points}
+                            disabled={!device?.writeAccess}
+                            onChange={(next) => {
+                                setPoints(next);
+                                setDirty(true);
+                            }}
+                        />
+                    </div>
+                </Card>
+            </>}
         </div>
     );
 }

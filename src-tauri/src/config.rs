@@ -4,9 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::curve::CurvePoint;
 
-/// `Auto` always runs the curve engine (the monitor thread applies the
-/// saved curve, or `curve::default_points()` if none was saved, on every
-/// tick); `Manual` re-applies a fixed per-fan percentage instead; `Disabled`
+/// `Auto` regulates temperature or applies an advanced curve; `Manual`
+/// applies a fixed per-fan percentage; `Disabled`
 /// hands every fan back to the EC once and the app doesn't touch them again
 /// until another mode is picked.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -15,6 +14,36 @@ pub enum FanMode {
     Auto,
     Manual,
     Disabled,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AutoStrategy {
+    #[default]
+    Adaptive,
+    Curve,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AutomaticControl {
+    pub strategy: AutoStrategy,
+    pub target_temp_c: f32,
+}
+
+impl Default for AutomaticControl {
+    fn default() -> Self {
+        Self {
+            strategy: AutoStrategy::Adaptive,
+            target_temp_c: 70.0,
+        }
+    }
+}
+
+impl AutomaticControl {
+    pub fn is_valid(&self) -> bool {
+        self.target_temp_c.is_finite() && (50.0..=85.0).contains(&self.target_temp_c)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -57,15 +86,11 @@ pub struct Config {
     pub temp_unit: TempUnit,
     pub theme: Theme,
     pub mode: FanMode,
-    /// Manual % (0-100) per fan id, used when mode == Manual.
     pub manual_boosts: HashMap<String, u8>,
-    /// Curve points per fan id, used when mode == Curve.
+    pub automatic_control: AutomaticControl,
     pub curves: HashMap<String, Vec<CurvePoint>>,
-    /// Vendor chosen manually in Settings when automatic detection fails.
     pub vendor_override: Option<String>,
-    /// How many days of telemetry history to keep in the database.
     pub history_retention_days: u32,
-    /// Switch that sets every fan to a fixed manual boost, all at once.
     pub all_fans_boost: AllFansBoost,
 }
 
@@ -77,6 +102,7 @@ impl Default for Config {
             theme: Theme::System,
             mode: FanMode::Auto,
             manual_boosts: HashMap::new(),
+            automatic_control: AutomaticControl::default(),
             curves: HashMap::new(),
             vendor_override: None,
             history_retention_days: 7,

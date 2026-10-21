@@ -1,3 +1,4 @@
+pub mod automatic;
 pub mod commands;
 pub mod config;
 pub mod curve;
