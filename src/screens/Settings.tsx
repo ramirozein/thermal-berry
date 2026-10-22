@@ -258,7 +258,7 @@ export function Settings() {
                                 {value: "5", label: "5 seconds"},
                                 {value: "10", label: "10 seconds"},
                             ]}
-                            onChange={(v) => void updateConfig({updateIntervalSecs: Number(v)})}
+                            onChange={(v) => void updateConfig({updateIntervalSecs: Number(v)}).catch(() => {})}
                         />
                     </SettingRow>
                     <SettingRow
@@ -272,7 +272,7 @@ export function Settings() {
                                 {value: "celsius", label: "Celsius"},
                                 {value: "fahrenheit", label: "Fahrenheit"},
                             ]}
-                            onChange={(v) => void updateConfig({tempUnit: v})}
+                            onChange={(v) => void updateConfig({tempUnit: v}).catch(() => {})}
                         />
                     </SettingRow>
                     <SettingRow title="Theme" description="Interface appearance">
@@ -284,7 +284,7 @@ export function Settings() {
                                 {value: "light", label: "Light"},
                                 {value: "dark", label: "Dark"},
                             ]}
-                            onChange={(v) => void updateConfig({theme: v})}
+                            onChange={(v) => void updateConfig({theme: v}).catch(() => {})}
                         />
                     </SettingRow>
                     <SettingRow
@@ -300,7 +300,7 @@ export function Settings() {
                                 {value: "30", label: "30 days"},
                                 {value: "90", label: "90 days"},
                             ]}
-                            onChange={(v) => void updateConfig({historyRetentionDays: Number(v)})}
+                            onChange={(v) => void updateConfig({historyRetentionDays: Number(v)}).catch(() => {})}
                         />
                     </SettingRow>
                     <SettingRow
@@ -327,7 +327,7 @@ export function Settings() {
                     allFansBoost={config.allFansBoost}
                     onLiveReapply={(percent) => setAllFansBoost(true, percent)}
                     onPercentChange={(patch) =>
-                        updateConfig({allFansBoost: {...config.allFansBoost, ...patch}})
+                        updateConfig({allFansBoostPercent: patch.percent})
                     }
                 />
             )}

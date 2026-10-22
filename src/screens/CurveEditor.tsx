@@ -137,7 +137,7 @@ function CurveGraph({points, onChange, disabled,}: {
 
 export function CurveEditor() {
     const {config, device, setMode, updateConfig} = useApp();
-    const {latest} = useTelemetry();
+    const {latest, healthy, control} = useTelemetry();
     const fans = device?.fans ?? [];
     const [fanId, setFanId] = useState<string | null>(null);
     const activeFanId = fanId ?? fans[0]?.id ?? null;
@@ -182,7 +182,7 @@ export function CurveEditor() {
         try {
             await updateConfig({
                 automaticControl: {strategy, targetTempC},
-                ...(strategy === "curve" && activeFanId ? {curves: {...config.curves, [activeFanId]: points}} : {}),
+                ...(strategy === "curve" && activeFanId ? {curves: {[activeFanId]: points}} : {}),
             });
             await setMode("auto");
             setDirty(false);
@@ -193,7 +193,7 @@ export function CurveEditor() {
         }
     };
 
-    const controlActive = config?.mode === "auto" && config.automaticControl.strategy === strategy;
+    const controlActive = healthy && control?.appliedMode === "auto" && config?.mode === "auto" && config.automaticControl.strategy === strategy;
 
     return (
         <div className="flex flex-col gap-6">
@@ -236,7 +236,7 @@ export function CurveEditor() {
                 <fieldset aria-label="Automatic regulation method" className="flex flex-wrap gap-1 rounded-lg bg-secondary p-1">
                     {([
                         {value: "adaptive", label: "Target temperature"},
-                        {value: "curve", label: "Advanced curves"},
+                        {value: "curve", label: "Curves"},
                     ] as const).map((option) => (
                         <label key={option.value} className="cursor-pointer">
                             <input

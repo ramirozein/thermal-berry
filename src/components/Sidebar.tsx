@@ -107,7 +107,7 @@ export function Sidebar({screen, onNavigate,}: {
                 )}
                 <button
                     type="button"
-                    onClick={() => void updateConfig({theme: isDark ? "light" : "dark"})}
+                    onClick={() => void updateConfig({theme: isDark ? "light" : "dark"}).catch(() => {})}
                     className="flex h-10 w-full items-center gap-3 rounded-lg px-3 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
                 >
                     {isDark ? <Sun className="size-4"/> : <Moon className="size-4"/>}

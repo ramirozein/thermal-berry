@@ -60,6 +60,9 @@ pub fn spawn(app: AppHandle, state: Arc<AppState>) {
             if last_purge.is_none_or(|t| t.elapsed() >= PURGE_INTERVAL) {
                 last_purge = Some(Instant::now());
                 let inner = state.lock();
+                if inner.control.maintenance || inner.db.is_none() {
+                    continue;
+                }
                 let retention_ms = inner.config.retention_days() as u64 * 24 * 3600 * 1000;
                 let now_ms = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -67,6 +70,8 @@ pub fn spawn(app: AppHandle, state: Arc<AppState>) {
                     .unwrap_or(0);
                 if let Err(e) = inner
                     .db
+                    .as_ref()
+                    .unwrap()
                     .purge_older_than(now_ms.saturating_sub(retention_ms))
                 {
                     eprintln!("thermal-berry: error purging old telemetry: {e}");
@@ -95,6 +100,14 @@ fn status_line(sample: &Sample) -> String {
         .iter()
         .map(|t| format!("{} {:.0}°C", t.label, t.celsius))
         .collect();
+    if !sample.errors.is_empty()
+        || sample
+            .control
+            .as_ref()
+            .is_some_and(|c| c.error.is_some() || c.suspended)
+    {
+        parts.insert(0, "Control / telemetry error".into());
+    }
     parts.extend(
         sample
             .fans
@@ -116,44 +129,75 @@ fn control_interval(config: &crate::config::Config) -> u64 {
     }
 }
 
-fn tick(state: &Arc<AppState>, elapsed_secs: f32) -> Option<Sample> {
+pub(crate) fn tick(state: &Arc<AppState>, elapsed_secs: f32) -> Option<Sample> {
     let mut inner = state.lock();
-    let device = inner.device.as_ref()?;
-
-    // Retain failed positions so a missing CPU sensor cannot shift the GPU
-    // reading onto the wrong fan in the advanced curve strategy.
-    let readings: Vec<Option<TempReading>> = device
-        .sensors()
-        .iter()
-        .map(|s| {
-            s.read_celsius()
-                .ok()
-                .filter(|c| c.is_finite() && (0.0..=150.0).contains(c))
-                .map(|celsius| TempReading {
-                    label: s.label().to_string(),
-                    celsius,
-                })
-        })
-        .collect();
+    if inner.control.maintenance || inner.db.is_none() {
+        return None;
+    }
+    let mut errors = Vec::new();
+    let (readings, fans) = if let Some(device) = inner.device.as_ref() {
+        let readings: Vec<Option<TempReading>> = device
+            .sensors()
+            .iter()
+            .map(|sensor| match sensor.read_celsius() {
+                Ok(celsius) if celsius.is_finite() && (0.0..=150.0).contains(&celsius) => {
+                    Some(TempReading {
+                        label: sensor.label().into(),
+                        celsius,
+                    })
+                }
+                result => {
+                    errors.push(format!(
+                        "Sensor {} unavailable: {:?}",
+                        sensor.label(),
+                        result
+                    ));
+                    None
+                }
+            })
+            .collect();
+        (readings, device.fans())
+    } else {
+        errors.push("No compatible thermal device detected".into());
+        (Vec::new(), Vec::new())
+    };
     let missing_sensor = readings.is_empty() || readings.iter().any(Option::is_none);
+    if readings.is_empty() {
+        errors.push("No temperature sensors reporting".into());
+    }
+    if fans.is_empty() {
+        errors.push("No fans detected".into());
+    }
     let temps: Vec<TempReading> = readings.iter().flatten().cloned().collect();
-
-    let fans = device.fans();
-    let fan_readings: Vec<FanReading> = fans
+    let mut fan_readings: Vec<FanReading> = fans
         .iter()
-        .map(|f| FanReading {
-            id: f.id().to_string(),
-            label: f.label().to_string(),
-            rpm: f.read_rpm().ok(),
-            boost_percent: f
-                .read_boost()
-                .ok()
-                .map(|b| curve::boost_to_percent(b, f.boost_range())),
-            max_rpm: f.max_rpm(),
+        .map(|fan| {
+            let rpm = match fan.read_rpm() {
+                Ok(value) => Some(value),
+                Err(e) => {
+                    errors.push(format!("{} RPM: {e}", fan.id()));
+                    None
+                }
+            };
+            let boost_percent = match fan.read_boost() {
+                Ok(value) => Some(curve::boost_to_percent(value, fan.boost_range())),
+                Err(e) => {
+                    errors.push(format!("{} boost: {e}", fan.id()));
+                    None
+                }
+            };
+            FanReading {
+                id: fan.id().into(),
+                label: fan.label().into(),
+                rpm,
+                boost_percent,
+                max_rpm: fan.max_rpm(),
+            }
         })
         .collect();
 
-    if inner.config.mode == FanMode::Auto {
+    if inner.config.mode == FanMode::Auto && !inner.control.suspended {
+        let mut all_applied = !fans.is_empty();
         let max_temp = temps.iter().map(|t| t.celsius).fold(f32::MIN, f32::max);
         for (i, fan) in fans.iter().enumerate() {
             let settings = inner.config.automatic_control;
@@ -192,26 +236,50 @@ fn tick(state: &Arc<AppState>, elapsed_secs: f32) -> Option<Sample> {
             if let Err(e) = fan.set_boost(boost) {
                 inner.automatic_states.remove(fan.id());
                 inner.curve_states.remove(fan.id());
-                eprintln!(
-                    "thermal-berry: automatic control could not write {}: {e}",
+                all_applied = false;
+                errors.push(format!(
+                    "Automatic control could not write {}: {e}",
                     fan.id()
-                );
+                ));
+            } else {
+                inner
+                    .control
+                    .applied_boosts
+                    .insert(fan.id().into(), percent);
+                inner.control.last_applied_ms = Some(crate::commands::now_ms());
             }
+            // Observed boost and last successful command are separate values.
+            fan_readings[i].boost_percent = match fan.read_boost() {
+                Ok(value) => Some(curve::boost_to_percent(value, fan.boost_range())),
+                Err(e) => {
+                    errors.push(format!("{} boost readback: {e}", fan.id()));
+                    None
+                }
+            };
         }
+        inner.control.applied_mode = if all_applied {
+            Some(FanMode::Auto)
+        } else {
+            None
+        };
     }
 
-    let sample = Sample {
+    let mut sample = Sample {
         timestamp_ms: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0),
         temps,
         fans: fan_readings,
+        control: Some(inner.snapshot().control),
+        errors,
     };
-    inner.push_sample(sample.clone());
-    if let Err(e) = inner.db.insert_sample(&sample) {
-        eprintln!("thermal-berry: error persisting sample: {e}");
+    if let Err(e) = inner.db.as_ref().unwrap().insert_sample(&sample) {
+        sample
+            .errors
+            .push(format!("Could not persist telemetry: {e}"));
     }
+    inner.push_sample(sample.clone());
     Some(sample)
 }
 
@@ -223,7 +291,7 @@ mod tests {
     use crate::thermal::{Fan, Result, TempSensor, ThermalDevice, ThermalError};
     use std::sync::Mutex;
 
-    struct TestFan(Arc<Mutex<Vec<u8>>>);
+    struct TestFan(Arc<Mutex<Vec<u8>>>, bool);
 
     impl Fan for TestFan {
         fn id(&self) -> &str {
@@ -240,6 +308,9 @@ mod tests {
         }
         fn set_boost(&self, value: u8) -> Result<()> {
             self.0.lock().unwrap().push(value);
+            if self.1 {
+                return Err(ThermalError::Control("simulated write failure".into()));
+            }
             Ok(())
         }
         fn boost_range(&self) -> (u8, u8) {
@@ -268,6 +339,7 @@ mod tests {
     struct TestDevice {
         temps: Vec<Option<f32>>,
         writes: Arc<Mutex<Vec<u8>>>,
+        fail_writes: bool,
     }
 
     impl ThermalDevice for TestDevice {
@@ -281,7 +353,7 @@ mod tests {
             None
         }
         fn fans(&self) -> Vec<Box<dyn Fan>> {
-            vec![Box::new(TestFan(self.writes.clone()))]
+            vec![Box::new(TestFan(self.writes.clone(), self.fail_writes))]
         }
         fn sensors(&self) -> Vec<Box<dyn TempSensor>> {
             self.temps
@@ -299,6 +371,7 @@ mod tests {
         let device = TestDevice {
             temps,
             writes: writes.clone(),
+            fail_writes: false,
         };
         (
             Arc::new(AppState::new(
@@ -367,6 +440,54 @@ mod tests {
             tick(&state, 2.0).unwrap();
             assert!(writes.lock().unwrap().is_empty());
         }
+    }
+
+    #[test]
+    fn telemetry_exposes_sensor_failures_and_the_successful_safety_command() {
+        let (state, _) = test_state(vec![None, Some(45.0)], Config::default());
+        let sample = tick(&state, 2.0).unwrap();
+        assert_eq!(sample.temps.len(), 1);
+        assert!(sample.errors.iter().any(|e| e.contains("Sensor")));
+        let control = sample.control.unwrap();
+        assert_eq!(control.applied_mode, Some(FanMode::Auto));
+        assert_eq!(control.applied_boosts["fan1"], 100);
+        assert!(control.last_applied_ms.is_some());
+    }
+
+    #[test]
+    fn automatic_write_failure_is_visible_and_not_confirmed_as_active() {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let device = TestDevice {
+            temps: vec![Some(70.0)],
+            writes,
+            fail_writes: true,
+        };
+        let state = Arc::new(AppState::new(
+            Some(Box::new(device)),
+            Config::default(),
+            Db::open_in_memory().unwrap(),
+        ));
+        let sample = tick(&state, 2.0).unwrap();
+        assert!(sample
+            .errors
+            .iter()
+            .any(|e| e.contains("could not write fan1")));
+        let control = sample.control.as_ref().unwrap();
+        assert_eq!(control.applied_mode, None);
+        assert!(control.applied_boosts.is_empty());
+        assert!(status_line(&sample).contains("error"));
+    }
+
+    #[test]
+    fn missing_device_still_emits_an_unhealthy_sample() {
+        let state = Arc::new(AppState::new(
+            None,
+            Config::default(),
+            Db::open_in_memory().unwrap(),
+        ));
+        let sample = tick(&state, 2.0).unwrap();
+        assert!(sample.errors.iter().any(|e| e.contains("No compatible")));
+        assert_eq!(sample.control.unwrap().applied_mode, None);
     }
 
     #[test]

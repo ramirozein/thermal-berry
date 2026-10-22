@@ -4,7 +4,7 @@ use std::sync::{Mutex, MutexGuard};
 use serde::Serialize;
 
 use crate::automatic::AutomaticController;
-use crate::config::Config;
+use crate::config::{Config, FanMode};
 use crate::curve::Hysteresis;
 use crate::db::Db;
 use crate::thermal::ThermalDevice;
@@ -34,6 +34,27 @@ pub struct Sample {
     pub timestamp_ms: u64,
     pub temps: Vec<TempReading>,
     pub fans: Vec<FanReading>,
+    pub control: Option<ControlStatus>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlStatus {
+    pub config_revision: u64,
+    pub applied_mode: Option<FanMode>,
+    pub last_applied_ms: Option<u64>,
+    pub applied_boosts: HashMap<String, u8>,
+    pub error: Option<String>,
+    pub suspended: bool,
+    pub maintenance: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StateSnapshot {
+    pub config: Config,
+    pub control: ControlStatus,
 }
 
 pub struct AppState {
@@ -43,7 +64,8 @@ pub struct AppState {
 pub struct Inner {
     pub device: Option<Box<dyn ThermalDevice>>,
     pub config: Config,
-    pub db: Db,
+    pub db: Option<Db>,
+    pub control: ControlStatus,
     pub history: VecDeque<Sample>,
     pub automatic_states: HashMap<String, AutomaticController>,
     pub curve_states: HashMap<String, Hysteresis>,
@@ -54,7 +76,8 @@ impl AppState {
         Self {
             inner: Mutex::new(Inner {
                 device,
-                db,
+                db: Some(db),
+                control: ControlStatus::default(),
                 config,
                 history: VecDeque::with_capacity(HISTORY_CAPACITY),
                 curve_states: HashMap::new(),
@@ -71,6 +94,15 @@ impl AppState {
 }
 
 impl Inner {
+    pub fn snapshot(&self) -> StateSnapshot {
+        let mut control = self.control.clone();
+        control.config_revision = self.config.revision;
+        StateSnapshot {
+            config: self.config.clone(),
+            control,
+        }
+    }
+
     pub fn push_sample(&mut self, sample: Sample) {
         if self.history.len() >= HISTORY_CAPACITY {
             self.history.pop_front();

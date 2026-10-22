@@ -41,6 +41,7 @@ pub fn run() {
         ))
         .manage(state.clone())
         .setup(move |app| {
+            commands::restore_control(&state);
             tray::setup(app.handle(), state.clone())?;
             monitor::spawn(app.handle().clone(), state);
             Ok(())
@@ -56,6 +57,7 @@ pub fn run() {
             commands::get_history,
             commands::get_history_range,
             commands::get_config,
+            commands::get_state,
             commands::set_config,
             commands::set_fan_boost,
             commands::set_all_fans_boost,
@@ -76,10 +78,16 @@ pub fn run() {
     app.run(|app_handle, event| {
         if let RunEvent::Exit = event {
             let state = app_handle.state::<Arc<AppState>>();
-            let inner = state.lock();
+            let mut inner = state.lock();
+            inner.control.maintenance = true;
             if let Some(device) = inner.device.as_ref() {
                 for fan in device.fans() {
-                    let _ = fan.set_boost(fan.boost_range().0);
+                    if let Err(e) = fan.set_boost(fan.boost_range().0) {
+                        eprintln!(
+                            "thermal-berry: could not return {} to firmware on exit: {e}",
+                            fan.id()
+                        );
+                    }
                 }
             }
         }

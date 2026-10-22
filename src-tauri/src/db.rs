@@ -64,20 +64,22 @@ impl Db {
         let path = Self::path().ok_or_else(|| db_err("no data directory available"))?;
         fs::create_dir_all(path.parent().unwrap()).map_err(db_err)?;
         let conn = Connection::open(&path).map_err(db_err)?;
-        Self::init(conn)
+        Self::init(conn, true)
     }
 
     /// Fallback (and test) database: keeps the app fully functional when the
     /// on-disk database cannot be opened, just without persistence.
     pub fn open_in_memory() -> DbResult<Self> {
-        Self::init(Connection::open_in_memory().map_err(db_err)?)
+        Self::init(Connection::open_in_memory().map_err(db_err)?, false)
     }
 
-    fn init(conn: Connection) -> DbResult<Self> {
+    fn init(conn: Connection, import_legacy: bool) -> DbResult<Self> {
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.execute_batch(SCHEMA).map_err(db_err)?;
         let db = Self { conn };
-        db.import_legacy_json();
+        if import_legacy {
+            db.import_legacy_json();
+        }
         Ok(db)
     }
 
@@ -109,6 +111,11 @@ impl Db {
             }
             Err(e) => eprintln!("thermal-berry: ignoring corrupt legacy config.json: {e}"),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reject_writes(&self) {
+        self.conn.pragma_update(None, "query_only", true).unwrap();
     }
 
     pub fn load_config(&self) -> Config {
@@ -143,6 +150,9 @@ impl Db {
         if let Some(v) = read("allFansBoost").and_then(|v| serde_json::from_str(&v).ok()) {
             config.all_fans_boost = v;
         }
+        if config.mode != crate::config::FanMode::Manual {
+            config.all_fans_boost.enabled = false;
+        }
 
         if let Some(v) = read("automaticControl")
             .and_then(|v| serde_json::from_str::<crate::config::AutomaticControl>(&v).ok())
@@ -151,20 +161,22 @@ impl Db {
             config.automatic_control = v;
         }
 
-        let mut stmt = match self.conn.prepare("SELECT fan_id, percent FROM manual_boosts") {
+        let mut stmt = match self
+            .conn
+            .prepare("SELECT fan_id, percent FROM manual_boosts")
+        {
             Ok(s) => s,
             Err(_) => return config,
         };
-        if let Ok(rows) = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, u8>(1)?))
-        }) {
+        if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u8>(1)?))) {
             config.manual_boosts = rows.flatten().collect();
         }
         drop(stmt);
 
-        let mut stmt = match self.conn.prepare(
-            "SELECT fan_id, temp_c, percent FROM curve_points ORDER BY fan_id, position",
-        ) {
+        let mut stmt = match self
+            .conn
+            .prepare("SELECT fan_id, temp_c, percent FROM curve_points ORDER BY fan_id, position")
+        {
             Ok(s) => s,
             Err(_) => return config,
         };
@@ -191,23 +203,39 @@ impl Db {
                 .prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)")
                 .map_err(db_err)?;
             let scalars: [(&str, String); 8] = [
-                ("updateIntervalSecs", config.update_interval_secs.to_string()),
-                ("tempUnit", serde_json::to_string(&config.temp_unit).unwrap()),
+                (
+                    "updateIntervalSecs",
+                    config.update_interval_secs.to_string(),
+                ),
+                (
+                    "tempUnit",
+                    serde_json::to_string(&config.temp_unit).unwrap(),
+                ),
                 ("theme", serde_json::to_string(&config.theme).unwrap()),
                 ("mode", serde_json::to_string(&config.mode).unwrap()),
                 (
                     "automaticControl",
                     serde_json::to_string(&config.automatic_control).unwrap(),
                 ),
-                ("vendorOverride", serde_json::to_string(&config.vendor_override).unwrap()),
-                ("historyRetentionDays", config.history_retention_days.to_string()),
-                ("allFansBoost", serde_json::to_string(&config.all_fans_boost).unwrap()),
+                (
+                    "vendorOverride",
+                    serde_json::to_string(&config.vendor_override).unwrap(),
+                ),
+                (
+                    "historyRetentionDays",
+                    config.history_retention_days.to_string(),
+                ),
+                (
+                    "allFansBoost",
+                    serde_json::to_string(&config.all_fans_boost).unwrap(),
+                ),
             ];
             for (key, value) in scalars {
                 upsert.execute(params![key, value]).map_err(db_err)?;
             }
 
-            tx.execute("DELETE FROM manual_boosts", []).map_err(db_err)?;
+            tx.execute("DELETE FROM manual_boosts", [])
+                .map_err(db_err)?;
             let mut insert = tx
                 .prepare("INSERT INTO manual_boosts (fan_id, percent) VALUES (?1, ?2)")
                 .map_err(db_err)?;
@@ -299,6 +327,8 @@ impl Db {
                     timestamp_ms: row.0,
                     temps: Vec::new(),
                     fans: Vec::new(),
+                    control: None,
+                    errors: Vec::new(),
                 })
                 .temps
                 .push(row.1);
@@ -333,6 +363,8 @@ impl Db {
                     timestamp_ms: row.0,
                     temps: Vec::new(),
                     fans: Vec::new(),
+                    control: None,
+                    errors: Vec::new(),
                 })
                 .fans
                 .push(row.1);
@@ -369,6 +401,8 @@ mod tests {
 
     fn sample(ts: u64) -> Sample {
         Sample {
+            control: None,
+            errors: Vec::new(),
             timestamp_ms: ts,
             temps: vec![TempReading {
                 label: "CPU".into(),
@@ -397,8 +431,14 @@ mod tests {
         config.curves.insert(
             "fan2".into(),
             vec![
-                CurvePoint { temp_c: 40.0, percent: 0 },
-                CurvePoint { temp_c: 90.0, percent: 100 },
+                CurvePoint {
+                    temp_c: 40.0,
+                    percent: 0,
+                },
+                CurvePoint {
+                    temp_c: 90.0,
+                    percent: 100,
+                },
             ],
         );
         config.all_fans_boost.enabled = true;

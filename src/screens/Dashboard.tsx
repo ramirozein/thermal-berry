@@ -29,7 +29,7 @@ function MetricCard({label, value, unit, detail, icon: Icon}: {
 }
 
 export function Dashboard() {
-    const {history, latest} = useTelemetry();
+    const {history, latest, isStale, healthy, control} = useTelemetry();
     const {config, device} = useApp();
     const unit = config?.tempUnit ?? "celsius";
     const configuredInterval = config?.updateIntervalSecs ?? 2;
@@ -43,15 +43,15 @@ export function Dashboard() {
         : config?.mode === "disabled" ? "Fan control disabled" : config?.automaticControl.strategy === "curve" ? "Automatic curves" : "Target temperature control";
 
     const statusItems = [
-        modeLabel,
+        `${modeLabel} · ${control?.appliedMode === config?.mode && healthy ? "confirmed" : "unconfirmed"}`,
         device ? `${device.fans.length} fans` : "No fans",
-        device ? `${device.sensors.length} active sensors` : "No sensors"
+        device ? `${isStale ? 0 : latest?.temps.length ?? 0}/${device.sensors.length} sensors reporting` : "No sensors"
     ];
 
     return (
         <div className="flex flex-col gap-6">
             <PageHeader title="Overview" subtitle="Live system telemetry"
-                        action={<StatusPill label={latest ? "Live" : "Waiting"} live={!!latest}/>}/>
+                        action={<StatusPill label={!latest ? "Waiting" : isStale ? "Stale" : healthy ? "Live" : "Degraded"} live={healthy}/>}/>
             <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
                 {latest?.temps.map((t) => (
                     <MetricCard
@@ -59,7 +59,7 @@ export function Dashboard() {
                         label={t.label}
                         value={String(tempValue(t.celsius))}
                         unit={unitSuffix}
-                        detail="Current temperature"
+                        detail={isStale ? "Last reading · stale" : "Current temperature"}
                         icon={Thermometer}
                     />
                 ))}
@@ -128,13 +128,13 @@ export function Dashboard() {
                         <h2 className="text-sm font-semibold">System status</h2>
                         <p className="mt-1 text-xs text-muted-foreground">
                             {device
-                                ? "All sensors are reporting normally"
+                                ? healthy ? "Readings current; fan control confirmed" : control?.suspended ? "Fan control suspended; select a mode to retry" : "Control or telemetry needs attention"
                                 : "No compatible device detected"}
                         </p>
                     </div>
                     <span className="flex items-center gap-2 text-xs font-medium">
-            <span className={cn("size-1.5 rounded-full", device ? "bg-primary" : "bg-destructive")}/>
-                        {device ? "Healthy" : "No device"}
+            <span className={cn("size-1.5 rounded-full", healthy ? "bg-primary" : "bg-destructive")}/>
+                        {!device ? "No device" : healthy ? "Healthy" : isStale ? "Stale" : "Degraded"}
           </span>
                 </div>
                 <div className="grid border-t border-border sm:grid-cols-3">

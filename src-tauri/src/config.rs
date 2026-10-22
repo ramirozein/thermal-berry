@@ -82,6 +82,8 @@ impl Default for AllFansBoost {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Config {
+    pub revision: u64,
+    pub control_epoch: u64,
     pub update_interval_secs: u64,
     pub temp_unit: TempUnit,
     pub theme: Theme,
@@ -97,6 +99,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            revision: 0,
+            control_epoch: 0,
             update_interval_secs: 2,
             temp_unit: TempUnit::Celsius,
             theme: Theme::System,
