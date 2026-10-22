@@ -127,7 +127,7 @@ export function ManualControl() {
                 <div className="flex items-start gap-3">
                     <Info className="mt-0.5 size-4 shrink-0 text-primary"/>
                     <p className="leading-relaxed">
-                        Boost adds on top of firmware cooling: 0% is full EC control, 100% is max.
+                        Boost adds on top of firmware cooling.
                     </p>
                 </div>
             </div>
