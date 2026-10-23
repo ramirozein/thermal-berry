@@ -2,9 +2,7 @@ import {invoke} from "@tauri-apps/api/core";
 import {listen, type UnlistenFn} from "@tauri-apps/api/event";
 
 /**
- * Auto always runs the curve engine; Manual applies a fixed % per fan;
- * Disabled hands every fan back to the EC and the app stops touching them
- * (only reachable from the tray menu's "Disable fan control").
+ * Auto regulates toward a target temperature or uses advanced curves.
  */
 export type FanMode = "auto" | "manual" | "disabled";
 export type TempUnit = "celsius" | "fahrenheit";
@@ -21,12 +19,18 @@ export interface AllFansBoost {
 }
 
 export interface Config {
+    revision: number;
+    controlEpoch: number;
     updateIntervalSecs: number;
     tempUnit: TempUnit;
     theme: Theme;
     mode: FanMode;
     manualBoosts: Record<string, number>;
     curves: Record<string, CurvePoint[]>;
+    automaticControl: {
+        strategy: "adaptive" | "curve";
+        targetTempC: number;
+    };
     vendorOverride: string | null;
     historyRetentionDays: number;
     allFansBoost: AllFansBoost;
@@ -45,7 +49,26 @@ export interface FanReading {
     maxRpm: number | null;
 }
 
+export interface ControlStatus {
+    configRevision: number;
+    appliedMode: FanMode | null;
+    lastAppliedMs: number | null;
+    appliedBoosts: Record<string, number>;
+    error: string | null;
+    suspended: boolean;
+    maintenance: boolean;
+}
+
+export interface StateSnapshot {
+    config: Config;
+    control: ControlStatus;
+}
+
+export type ConfigPatch = Partial<Pick<Config, "updateIntervalSecs" | "tempUnit" | "theme" | "historyRetentionDays" | "automaticControl" | "curves">> & {allFansBoostPercent?: number};
+
 export interface Sample {
+    control: ControlStatus | null;
+    errors: string[];
     timestampMs: number;
     temps: TempReading[];
     fans: FanReading[];
@@ -85,6 +108,7 @@ export interface ThermalError {
         | "invalid_value"
         | "io"
         | "database"
+        | "control"
         | "network";
     message: string;
 }
@@ -97,9 +121,11 @@ export const getDeviceInfo = () => invoke<DeviceInfo>("get_device_info");
 export const getHistory = () => invoke<Sample[]>("get_history");
 export const getHistoryRange = (fromMs: number, toMs: number) => invoke<Sample[]>("get_history_range", {fromMs, toMs});
 export const getConfig = () => invoke<Config>("get_config");
-export const setConfig = (config: Config) => invoke<Config>("set_config", {config});
-export const setFanBoost = (fanId: string, percent: number) => invoke<void>("set_fan_boost", {fanId, percent});
-export const setAllFansBoost = (enabled: boolean, percent: number) => invoke<Config>("set_all_fans_boost", {enabled, percent});
+export const getState = () => invoke<StateSnapshot>("get_state");
+export const listenState = (handler: (state: StateSnapshot) => void) => listen<StateSnapshot>("state-changed", (event) => handler(event.payload));
+export const setConfig = (patch: ConfigPatch) => invoke<void>("set_config", {patch});
+export const setFanBoost = (fanId: string, percent: number, expectedEpoch: number) => invoke<void>("set_fan_boost", {fanId, percent, expectedEpoch});
+export const setAllFansBoost = (enabled: boolean, percent: number) => invoke<void>("set_all_fans_boost", {enabled, percent});
 export const setMode = (mode: FanMode) => invoke<void>("set_mode", {mode});
 export const saveCurve = (fanId: string, points: CurvePoint[]) => invoke<void>("save_curve", {fanId, points});
 export const selectVendor = (vendor: string) => invoke<DeviceInfo>("select_vendor", {vendor});

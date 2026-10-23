@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tauri::{AppHandle, State};
 
-use crate::commands::UDEV_RULE_PATH;
+use crate::commands::{self, UDEV_RULE_PATH};
 use crate::db::Db;
 use crate::state::AppState;
 use crate::thermal::ThermalError;
@@ -26,35 +26,65 @@ enum InstallMethod {
 #[tauri::command]
 pub async fn uninstall_app(app: AppHandle, state: State<'_, Arc<AppState>>) -> CmdResult<()> {
     let state = Arc::clone(state.inner());
-    tauri::async_runtime::spawn_blocking(move || uninstall_blocking(&state))
-        .await
-        .map_err(|e| ThermalError::InvalidValue(format!("uninstall task failed: {e}")))??;
+    let removal_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let result = uninstall_blocking(&state, &removal_app);
+        if let Err(e) = &result {
+            commands::report_control_error(&state, e);
+        }
+        commands::publish_state(&removal_app, &state);
+        result
+    })
+    .await
+    .map_err(|e| ThermalError::Control(format!("uninstall task failed: {e}")))?;
+    result?;
     app.exit(0);
     Ok(())
 }
 
-fn uninstall_blocking(state: &Arc<AppState>) -> CmdResult<()> {
-    {
-        let inner = state.lock();
-        if let Some(device) = inner.device.as_ref() {
-            for fan in device.fans() {
-                let _ = fan.set_boost(fan.boost_range().0);
-            }
+fn uninstall_blocking(state: &Arc<AppState>, app: &AppHandle) -> CmdResult<()> {
+    commands::begin_maintenance(state)?;
+    commands::publish_state(app, state);
+    let result = (|| {
+        let method = detect_install_method();
+        run_privileged_removal(method)?;
+        // The monitor and IPC share this mutex; no connection remains open
+        // when deletion starts, and maintenance keeps subsequent ticks paused.
+        drop(state.lock().db.take());
+        if let Some(db_dir) = Db::path().and_then(|p| p.parent().map(PathBuf::from)) {
+            fs::remove_dir_all(&db_dir).map_err(|e| ThermalError::Io {
+                path: db_dir.display().to_string(),
+                source: e,
+            })?;
         }
+        remove_autostart_entry();
+        if method == InstallMethod::AppImage {
+            remove_appimage_files();
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        return Err(recover_after_failure(state, error));
     }
-
-    let method = detect_install_method();
-    run_privileged_removal(method)?;
-
-    if let Some(db_dir) = Db::path().and_then(|p| p.parent().map(PathBuf::from)) {
-        let _ = fs::remove_dir_all(db_dir);
-    }
-    remove_autostart_entry();
-    if method == InstallMethod::AppImage {
-        remove_appimage_files();
-    }
-
     Ok(())
+}
+
+pub(crate) fn recover_after_failure(state: &AppState, error: ThermalError) -> ThermalError {
+    let mut inner = state.lock();
+    // Authorization cancellation resumes read-only monitoring in Disabled.
+    // Once deletion starts the connection stays closed and monitoring paused.
+    inner.control.maintenance = inner.db.is_none();
+    let message = format!(
+        "Uninstall failed: {error}. Fan control remains disabled.{}",
+        if inner.control.maintenance {
+            " Monitoring remains paused because the database is closed; close the app."
+        } else {
+            " Select a mode to resume control."
+        }
+    );
+    inner.control.error = Some(message.clone());
+    inner.config.revision += 1;
+    ThermalError::Control(message)
 }
 
 fn detect_install_method() -> InstallMethod {

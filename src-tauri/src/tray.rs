@@ -44,13 +44,28 @@ pub fn setup(app: &AppHandle, state: Arc<AppState>) -> tauri::Result<()> {
     let status = MenuItem::with_id(app, MENU_STATUS, "Starting…", false, None::<&str>)?;
     let open = MenuItem::with_id(app, MENU_OPEN, "Open Thermal Berry", true, None::<&str>)?;
     let boost_all = CheckMenuItem::with_id(
-        app, MENU_BOOST_ALL, "Boost all fans", true, boost_all_enabled, None::<&str>,
+        app,
+        MENU_BOOST_ALL,
+        "Boost all fans",
+        true,
+        boost_all_enabled,
+        None::<&str>,
     )?;
     let mode_auto = CheckMenuItem::with_id(
-        app, MENU_MODE_AUTO, "Auto mode", true, mode == FanMode::Auto, None::<&str>,
+        app,
+        MENU_MODE_AUTO,
+        "Auto mode",
+        true,
+        mode == FanMode::Auto,
+        None::<&str>,
     )?;
     let mode_disabled = CheckMenuItem::with_id(
-        app, MENU_MODE_DISABLED, "Disable fan control", true, mode == FanMode::Disabled, None::<&str>,
+        app,
+        MENU_MODE_DISABLED,
+        "Disable fan control",
+        true,
+        mode == FanMode::Disabled,
+        None::<&str>,
     )?;
     let quit = MenuItem::with_id(app, MENU_QUIT, "Quit", true, None::<&str>)?;
 
@@ -87,42 +102,33 @@ pub fn setup(app: &AppHandle, state: Arc<AppState>) -> tauri::Result<()> {
             MENU_BOOST_ALL => {
                 let (enabled, percent) = {
                     let inner = state.lock();
-                    (!inner.config.all_fans_boost.enabled, inner.config.all_fans_boost.percent)
+                    (
+                        !inner.config.all_fans_boost.enabled,
+                        inner.config.all_fans_boost.percent,
+                    )
                 };
                 if let Err(e) = commands::apply_all_fans_boost(&state, enabled, percent) {
+                    commands::report_control_error(&state, &e);
                     eprintln!("thermal-berry: tray could not toggle boost: {e}");
                 }
-                // Re-sync from the real config: on error this reverts the click.
-                let inner = state.lock();
-                sync_mode(app, inner.config.mode);
-                sync_all_fans_boost(app, inner.config.all_fans_boost.enabled);
+                commands::publish_state(app, &state);
             }
             MENU_MODE_AUTO => {
                 // Only one mode is ever active: picking Auto also turns off
                 // the boost-all switch, so the items never disagree.
                 let percent = state.lock().config.all_fans_boost.percent;
                 if let Err(e) = commands::apply_all_fans_boost(&state, false, percent) {
+                    commands::report_control_error(&state, &e);
                     eprintln!("thermal-berry: tray could not set auto mode: {e}");
                 }
-                // Re-sync from the real config: on error this reverts the click.
-                let inner = state.lock();
-                sync_mode(app, inner.config.mode);
-                sync_all_fans_boost(app, inner.config.all_fans_boost.enabled);
+                commands::publish_state(app, &state);
             }
             MENU_MODE_DISABLED => {
-                // Same mutual-exclusion rule: disabling control also turns
-                // off the boost-all switch before switching mode.
-                let percent = state.lock().config.all_fans_boost.percent;
-                if let Err(e) = commands::apply_all_fans_boost(&state, false, percent) {
-                    eprintln!("thermal-berry: tray could not clear boost: {e}");
-                }
                 if let Err(e) = commands::apply_mode(&state, FanMode::Disabled) {
+                    commands::report_control_error(&state, &e);
                     eprintln!("thermal-berry: tray could not disable fan control: {e}");
                 }
-                // Re-sync from the real config: on error this reverts the click.
-                let inner = state.lock();
-                sync_mode(app, inner.config.mode);
-                sync_all_fans_boost(app, inner.config.all_fans_boost.enabled);
+                commands::publish_state(app, &state);
             }
             _ => {}
         })

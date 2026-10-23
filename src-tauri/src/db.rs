@@ -11,14 +11,9 @@ use crate::thermal::ThermalError;
 
 type DbResult<T> = Result<T, ThermalError>;
 
-/// Hard cap on rows returned by a single `query_range` call. Without it, a
-/// wide range (e.g. the full retention window at a 1s interval) could pull
-/// hundreds of thousands of rows into memory and across the IPC boundary in
-/// one shot.
 const MAX_RANGE_ROWS: i64 = 20_000;
 
-/// Single owner of the SQLite database. Lives inside `AppState`'s mutex, so
-/// all access (commands + monitor thread) is already serialized.
+/// Single owner of the SQLite database.
 pub struct Db {
     conn: Connection,
 }
@@ -69,27 +64,25 @@ impl Db {
         let path = Self::path().ok_or_else(|| db_err("no data directory available"))?;
         fs::create_dir_all(path.parent().unwrap()).map_err(db_err)?;
         let conn = Connection::open(&path).map_err(db_err)?;
-        Self::init(conn)
+        Self::init(conn, true)
     }
 
     /// Fallback (and test) database: keeps the app fully functional when the
     /// on-disk database cannot be opened, just without persistence.
     pub fn open_in_memory() -> DbResult<Self> {
-        Self::init(Connection::open_in_memory().map_err(db_err)?)
+        Self::init(Connection::open_in_memory().map_err(db_err)?, false)
     }
 
-    fn init(conn: Connection) -> DbResult<Self> {
-        // WAL keeps the frequent monitor writes from blocking readers.
+    fn init(conn: Connection, import_legacy: bool) -> DbResult<Self> {
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.execute_batch(SCHEMA).map_err(db_err)?;
         let db = Self { conn };
-        db.import_legacy_json();
+        if import_legacy {
+            db.import_legacy_json();
+        }
         Ok(db)
     }
 
-    /// One-time migration from the pre-SQLite config.json. Runs only when the
-    /// settings table is empty; the file is renamed afterwards so it never
-    /// shadows the database again.
     fn import_legacy_json(&self) {
         let empty: bool = self
             .conn
@@ -120,7 +113,10 @@ impl Db {
         }
     }
 
-    // --- Config ---
+    #[cfg(test)]
+    pub(crate) fn reject_writes(&self) {
+        self.conn.pragma_update(None, "query_only", true).unwrap();
+    }
 
     pub fn load_config(&self) -> Config {
         let mut config = Config::default();
@@ -132,7 +128,7 @@ impl Db {
                 })
                 .ok()
         };
-        // Each field falls back to its default if missing or unparsable.
+
         if let Some(v) = read("updateIntervalSecs").and_then(|v| serde_json::from_str(&v).ok()) {
             config.update_interval_secs = v;
         }
@@ -154,21 +150,33 @@ impl Db {
         if let Some(v) = read("allFansBoost").and_then(|v| serde_json::from_str(&v).ok()) {
             config.all_fans_boost = v;
         }
+        if config.mode != crate::config::FanMode::Manual {
+            config.all_fans_boost.enabled = false;
+        }
 
-        let mut stmt = match self.conn.prepare("SELECT fan_id, percent FROM manual_boosts") {
+        if let Some(v) = read("automaticControl")
+            .and_then(|v| serde_json::from_str::<crate::config::AutomaticControl>(&v).ok())
+            .filter(|v| v.is_valid())
+        {
+            config.automatic_control = v;
+        }
+
+        let mut stmt = match self
+            .conn
+            .prepare("SELECT fan_id, percent FROM manual_boosts")
+        {
             Ok(s) => s,
             Err(_) => return config,
         };
-        if let Ok(rows) = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, u8>(1)?))
-        }) {
+        if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u8>(1)?))) {
             config.manual_boosts = rows.flatten().collect();
         }
         drop(stmt);
 
-        let mut stmt = match self.conn.prepare(
-            "SELECT fan_id, temp_c, percent FROM curve_points ORDER BY fan_id, position",
-        ) {
+        let mut stmt = match self
+            .conn
+            .prepare("SELECT fan_id, temp_c, percent FROM curve_points ORDER BY fan_id, position")
+        {
             Ok(s) => s,
             Err(_) => return config,
         };
@@ -194,20 +202,40 @@ impl Db {
             let mut upsert = tx
                 .prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)")
                 .map_err(db_err)?;
-            let scalars: [(&str, String); 7] = [
-                ("updateIntervalSecs", config.update_interval_secs.to_string()),
-                ("tempUnit", serde_json::to_string(&config.temp_unit).unwrap()),
+            let scalars: [(&str, String); 8] = [
+                (
+                    "updateIntervalSecs",
+                    config.update_interval_secs.to_string(),
+                ),
+                (
+                    "tempUnit",
+                    serde_json::to_string(&config.temp_unit).unwrap(),
+                ),
                 ("theme", serde_json::to_string(&config.theme).unwrap()),
                 ("mode", serde_json::to_string(&config.mode).unwrap()),
-                ("vendorOverride", serde_json::to_string(&config.vendor_override).unwrap()),
-                ("historyRetentionDays", config.history_retention_days.to_string()),
-                ("allFansBoost", serde_json::to_string(&config.all_fans_boost).unwrap()),
+                (
+                    "automaticControl",
+                    serde_json::to_string(&config.automatic_control).unwrap(),
+                ),
+                (
+                    "vendorOverride",
+                    serde_json::to_string(&config.vendor_override).unwrap(),
+                ),
+                (
+                    "historyRetentionDays",
+                    config.history_retention_days.to_string(),
+                ),
+                (
+                    "allFansBoost",
+                    serde_json::to_string(&config.all_fans_boost).unwrap(),
+                ),
             ];
             for (key, value) in scalars {
                 upsert.execute(params![key, value]).map_err(db_err)?;
             }
 
-            tx.execute("DELETE FROM manual_boosts", []).map_err(db_err)?;
+            tx.execute("DELETE FROM manual_boosts", [])
+                .map_err(db_err)?;
             let mut insert = tx
                 .prepare("INSERT INTO manual_boosts (fan_id, percent) VALUES (?1, ?2)")
                 .map_err(db_err)?;
@@ -232,8 +260,6 @@ impl Db {
         }
         tx.commit().map_err(db_err)
     }
-
-    // --- Telemetry history ---
 
     pub fn insert_sample(&self, sample: &Sample) -> DbResult<()> {
         let tx = self.conn.unchecked_transaction().map_err(db_err)?;
@@ -301,6 +327,8 @@ impl Db {
                     timestamp_ms: row.0,
                     temps: Vec::new(),
                     fans: Vec::new(),
+                    control: None,
+                    errors: Vec::new(),
                 })
                 .temps
                 .push(row.1);
@@ -335,6 +363,8 @@ impl Db {
                     timestamp_ms: row.0,
                     temps: Vec::new(),
                     fans: Vec::new(),
+                    control: None,
+                    errors: Vec::new(),
                 })
                 .fans
                 .push(row.1);
@@ -357,10 +387,6 @@ impl Db {
                 [cutoff_ms as i64],
             )
             .map_err(db_err)?;
-        // In WAL mode SQLite auto-checkpoints around 1000 pages, but under
-        // continuous writes that alone doesn't reclaim disk space; truncate
-        // explicitly so a long-running app doesn't grow the WAL file
-        // unbounded between purges.
         self.conn
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
             .map_err(db_err)?;
@@ -375,6 +401,8 @@ mod tests {
 
     fn sample(ts: u64) -> Sample {
         Sample {
+            control: None,
+            errors: Vec::new(),
             timestamp_ms: ts,
             temps: vec![TempReading {
                 label: "CPU".into(),
@@ -396,13 +424,21 @@ mod tests {
         let mut config = Config::default();
         config.update_interval_secs = 5;
         config.mode = FanMode::Manual;
+        config.automatic_control.target_temp_c = 65.0;
+        config.automatic_control.strategy = crate::config::AutoStrategy::Curve;
         config.vendor_override = Some("alienware".into());
         config.manual_boosts.insert("fan1".into(), 42);
         config.curves.insert(
             "fan2".into(),
             vec![
-                CurvePoint { temp_c: 40.0, percent: 0 },
-                CurvePoint { temp_c: 90.0, percent: 100 },
+                CurvePoint {
+                    temp_c: 40.0,
+                    percent: 0,
+                },
+                CurvePoint {
+                    temp_c: 90.0,
+                    percent: 100,
+                },
             ],
         );
         config.all_fans_boost.enabled = true;
@@ -412,6 +448,7 @@ mod tests {
         let loaded = db.load_config();
         assert_eq!(loaded.update_interval_secs, 5);
         assert_eq!(loaded.mode, FanMode::Manual);
+        assert_eq!(loaded.automatic_control, config.automatic_control);
         assert_eq!(loaded.vendor_override.as_deref(), Some("alienware"));
         assert_eq!(loaded.manual_boosts.get("fan1"), Some(&42));
         assert_eq!(loaded.curves.get("fan2").unwrap().len(), 2);
@@ -426,6 +463,18 @@ mod tests {
         assert_eq!(config.update_interval_secs, 2);
         assert_eq!(config.mode, FanMode::Auto);
         assert!(!config.all_fans_boost.enabled);
+    }
+
+    #[test]
+    fn invalid_automatic_settings_fall_back_to_defaults() {
+        let db = Db::open_in_memory().unwrap();
+        let mut config = Config::default();
+        config.automatic_control.target_temp_c = 99.0;
+        db.save_config(&config).unwrap();
+        assert_eq!(
+            db.load_config().automatic_control,
+            crate::config::AutomaticControl::default(),
+        );
     }
 
     #[test]

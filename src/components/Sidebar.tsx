@@ -18,7 +18,7 @@ import type {Screen} from "../App";
 const navItems = [
     {id: "dashboard" as const, label: "Overview", icon: Activity},
     {id: "manual" as const, label: "Manual Control", icon: SlidersHorizontal},
-    {id: "curve" as const, label: "Curves", icon: CircleGauge},
+    {id: "curve" as const, label: "Automatic Control", icon: CircleGauge},
     {id: "settings" as const, label: "Settings", icon: Settings},
 ];
 
@@ -107,7 +107,7 @@ export function Sidebar({screen, onNavigate,}: {
                 )}
                 <button
                     type="button"
-                    onClick={() => void updateConfig({theme: isDark ? "light" : "dark"})}
+                    onClick={() => void updateConfig({theme: isDark ? "light" : "dark"}).catch(() => {})}
                     className="flex h-10 w-full items-center gap-3 rounded-lg px-3 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
                 >
                     {isDark ? <Sun className="size-4"/> : <Moon className="size-4"/>}

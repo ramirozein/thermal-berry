@@ -2,36 +2,38 @@ import {useEffect, useRef, useState} from "react";
 import {Fan, Info, RotateCcw} from "lucide-react";
 import {Button, Card, PageHeader} from "../components/ui";
 import {PermissionBanner} from "../components/PermissionBanner";
-import {setFanBoost, type FanInfo} from "../lib/ipc";
+import {type FanInfo} from "../lib/ipc";
 import {formatTemp, useApp} from "../lib/app-context";
 import {useTelemetry} from "../lib/telemetry";
 
-function FanControl({fan, disabled}: { fan: FanInfo; disabled: boolean }) {
-    const {config} = useApp();
-    const {latest} = useTelemetry();
+function FanControl({fan, disabled, timers}: { fan: FanInfo; disabled: boolean; timers: Map<string, ReturnType<typeof setTimeout>> }) {
+    const {config, setFanBoost} = useApp();
+    const {latest, control} = useTelemetry();
     const [value, setValue] = useState(config?.manualBoosts[fan.id] ?? 0);
-    const debounce = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+    useEffect(() => () => {
+        clearTimeout(timers.get(fan.id));
+        timers.delete(fan.id);
+    }, [fan.id, timers, config?.controlEpoch]);
 
-    // Syncs the slider if the mode changed from another screen
     const configPct = config?.mode === "manual" ? (config.manualBoosts[fan.id] ?? 0) : 0;
     const lastSynced = useRef(configPct);
     useEffect(() => {
-        if (configPct !== lastSynced.current) {
-            lastSynced.current = configPct;
-            setValue(configPct);
-        }
-    }, [configPct]);
+        lastSynced.current = configPct;
+        setValue(configPct);
+    }, [configPct, config?.controlEpoch]);
 
     const reading = latest?.fans.find((f) => f.id === fan.id);
     const sensor = latest?.temps.find((t) => fan.label.includes(t.label));
 
     const apply = (pct: number) => {
         setValue(pct);
-        clearTimeout(debounce.current);
-        debounce.current = setTimeout(() => {
-            lastSynced.current = pct;
-            void setFanBoost(fan.id, pct).catch((e) => console.error(e));
-        }, 150);
+        clearTimeout(timers.get(fan.id));
+        if (!config) return;
+        const epoch = config.controlEpoch;
+        timers.set(fan.id, setTimeout(() => {
+            timers.delete(fan.id);
+            void setFanBoost(fan.id, pct, epoch).catch(() => setValue(lastSynced.current));
+        }, 150));
     };
 
     return (
@@ -75,9 +77,12 @@ function FanControl({fan, disabled}: { fan: FanInfo; disabled: boolean }) {
           {value}%
         </span>
             </div>
+            <p className="mt-4 text-xs text-muted-foreground">
+                Last successful command: {control?.appliedBoosts[fan.id] ?? "—"}%
+            </p>
             <div
                 className="mt-5 flex items-center justify-between border-t border-border pt-4 text-xs text-muted-foreground">
-                <span>Applied boost</span>
+                <span>Observed boost</span>
                 <span className="font-mono text-foreground">
           {reading?.boostPercent !== null && reading?.boostPercent !== undefined
               ? `${reading.boostPercent}%`
@@ -89,8 +94,18 @@ function FanControl({fan, disabled}: { fan: FanInfo; disabled: boolean }) {
 }
 
 export function ManualControl() {
-    const {device, setMode} = useApp();
-    const writable = !!device?.writeAccess;
+    const {device, setMode, control, cancelManualAdjustments} = useApp();
+    const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>()).current;
+    const cancelPending = () => {
+        timers.forEach(clearTimeout);
+        timers.clear();
+    };
+    useEffect(() => () => {
+        cancelManualAdjustments();
+        timers.forEach(clearTimeout);
+        timers.clear();
+    }, [timers, cancelManualAdjustments]);
+    const writable = !!device?.writeAccess && !control?.maintenance;
 
     return (
         <div className="flex flex-col gap-6">
@@ -98,7 +113,10 @@ export function ManualControl() {
                 title="Manual Control"
                 subtitle="Set a constant boost per fan"
                 action={
-                    <Button variant="outline" onClick={() => void setMode("auto")}>
+                    <Button variant="outline" onClick={() => {
+                        cancelPending();
+                        void setMode("auto").catch(() => {});
+                    }}>
                         <RotateCcw className="size-3.5"/>
                         Back to automatic
                     </Button>
@@ -109,13 +127,13 @@ export function ManualControl() {
                 <div className="flex items-start gap-3">
                     <Info className="mt-0.5 size-4 shrink-0 text-primary"/>
                     <p className="leading-relaxed">
-                        Boost adds on top of the automatic curve: 0% is full EC control, 100% is max.
+                        Boost adds on top of firmware cooling.
                     </p>
                 </div>
             </div>
             <div className="grid gap-4 lg:grid-cols-2">
                 {device?.fans.map((fan) => (
-                    <FanControl key={fan.id} fan={fan} disabled={!writable}/>
+                    <FanControl key={fan.id} fan={fan} disabled={!writable} timers={timers}/>
                 ))}
                 {!device && (
                     <Card className="p-5 text-sm text-muted-foreground lg:col-span-2">

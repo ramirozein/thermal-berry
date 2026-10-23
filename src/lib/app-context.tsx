@@ -4,6 +4,7 @@ import {
     useContext,
     useEffect,
     useState,
+    useRef,
     type ReactNode,
 } from "react";
 import * as ipc from "./ipc";
@@ -11,10 +12,15 @@ import type {Config, DeviceInfo, FanMode, TempUnit, UpdateInfo} from "./ipc";
 
 interface AppContextValue {
     config: Config | null;
+    control: ipc.ControlStatus | null;
+    actionError: string | null;
+    dismissError: () => void;
     device: DeviceInfo | null;
     deviceError: ipc.ThermalError | null;
     updateInfo: UpdateInfo | null;
-    updateConfig: (patch: Partial<Config>) => Promise<void>;
+    updateConfig: (patch: ipc.ConfigPatch) => Promise<void>;
+    cancelManualAdjustments: () => void;
+    setFanBoost: (fanId: string, percent: number, expectedEpoch: number) => Promise<void>;
     setMode: (mode: FanMode) => Promise<void>;
     setAllFansBoost: (enabled: boolean, percent: number) => Promise<void>;
     refreshDevice: () => Promise<void>;
@@ -23,7 +29,34 @@ interface AppContextValue {
 const AppContext = createContext<AppContextValue | null>(null);
 
 export function AppProvider({children}: { children: ReactNode }) {
-    const [config, setConfigState] = useState<Config | null>(null);
+    const [snapshot, setSnapshot] = useState<ipc.StateSnapshot | null>(null);
+    const config = snapshot?.config ?? null;
+    const [actionError, setActionError] = useState<string | null>(null);
+    const manualSession = useRef(0);
+    const cancelManualAdjustments = useCallback(() => { manualSession.current += 1; }, []);
+    const pending = useRef<Promise<void>>(Promise.resolve());
+    const acceptSnapshot = useCallback((next: ipc.StateSnapshot) => {
+        setSnapshot((current) => {
+            if (current && current.config.revision > next.config.revision) return current;
+            return {...next, config: current?.config.revision === next.config.revision ? current.config : next.config};
+        });
+    }, []);
+    const refreshState = useCallback(async () => acceptSnapshot(await ipc.getState()), [acceptSnapshot]);
+    const mutate = useCallback((operation: () => Promise<void>) => {
+        const task = pending.current.then(async () => {
+            try {
+                await operation();
+                await refreshState();
+                setActionError(null);
+            } catch (e) {
+                setActionError(ipc.isThermalError(e) ? e.message : String(e));
+                await refreshState().catch(() => {});
+                throw e;
+            }
+        });
+        pending.current = task.catch(() => {});
+        return task;
+    }, [refreshState]);
     const [device, setDevice] = useState<DeviceInfo | null>(null);
     const [deviceError, setDeviceError] = useState<ipc.ThermalError | null>(null);
     const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
@@ -40,10 +73,24 @@ export function AppProvider({children}: { children: ReactNode }) {
     }, []);
 
     useEffect(() => {
-        void ipc.getConfig().then(setConfigState);
+        let disposed = false;
+        let unlisten: (() => void) | undefined;
+        void (async () => {
+            try {
+                const stop = await ipc.listenState(acceptSnapshot);
+                if (disposed) { stop(); return; }
+                unlisten = stop;
+            } catch (e) {
+                if (!disposed) setActionError(ipc.isThermalError(e) ? e.message : String(e));
+            }
+            if (!disposed) await refreshState().catch((e) => {
+                if (!disposed) setActionError(ipc.isThermalError(e) ? e.message : String(e));
+            });
+        })();
         void refreshDevice();
         ipc.checkForUpdate().then(setUpdateInfo).catch(() => setUpdateInfo(null));
-    }, [refreshDevice]);
+        return () => { disposed = true; unlisten?.(); };
+    }, [refreshDevice, acceptSnapshot, refreshState]);
 
     useEffect(() => {
         if (!config) return;
@@ -58,40 +105,38 @@ export function AppProvider({children}: { children: ReactNode }) {
         return () => media.removeEventListener("change", apply);
     }, [config]);
 
-    const updateConfig = useCallback(
-        async (patch: Partial<Config>) => {
-            if (!config) return;
-            const next = {...config, ...patch};
-            setConfigState(next);
-            setConfigState(await ipc.setConfig(next));
-        },
-        [config],
-    );
-
-    const setMode = useCallback(
-        async (mode: FanMode) => {
-            await ipc.setMode(mode);
-            setConfigState(await ipc.getConfig());
-        },
-        [],
-    );
-
-    const setAllFansBoost = useCallback(
-        async (enabled: boolean, percent: number) => {
-            setConfigState(await ipc.setAllFansBoost(enabled, percent));
-        },
-        [],
-    );
+    const updateConfig = useCallback((patch: ipc.ConfigPatch) => {
+        if (patch.automaticControl || patch.curves) cancelManualAdjustments();
+        return mutate(() => ipc.setConfig(patch));
+    }, [mutate, cancelManualAdjustments]);
+    const setMode = useCallback((mode: FanMode) => {
+        cancelManualAdjustments();
+        return mutate(() => ipc.setMode(mode));
+    }, [mutate, cancelManualAdjustments]);
+    const setFanBoost = useCallback((fanId: string, percent: number, expectedEpoch: number) => {
+        const session = manualSession.current;
+        return mutate(() => session === manualSession.current
+            ? ipc.setFanBoost(fanId, percent, expectedEpoch) : Promise.resolve());
+    }, [mutate]);
+    const setAllFansBoost = useCallback((enabled: boolean, percent: number) => {
+        cancelManualAdjustments();
+        return mutate(() => ipc.setAllFansBoost(enabled, percent));
+    }, [mutate, cancelManualAdjustments]);
 
     return (
         <AppContext.Provider
             value={{
                 config,
+                control: snapshot?.control ?? null,
+                actionError,
+                dismissError: () => setActionError(null),
                 device,
                 deviceError,
                 updateInfo,
                 updateConfig,
                 setMode,
+                setFanBoost,
+                cancelManualAdjustments,
                 setAllFansBoost,
                 refreshDevice,
             }}
