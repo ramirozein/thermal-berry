@@ -112,4 +112,4 @@ fn version_range(content: &str, path: &str) -> Result<Range<usize>, String> {
 }
 
 
-// rustc scripts/bump-version.rs -o /tmp/thermal-berry-bump-version && /tmp/thermal-berry-bump-version 1.1.3
+// rustc scripts/bump-version.rs -o /tmp/thermal-berry-bump-version && /tmp/thermal-berry-bump-version 1.1.4

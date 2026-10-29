@@ -384,11 +384,37 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_uses_hottest_sensor_and_keeps_regulating() {
+    fn adaptive_uses_hottest_sensor_and_waits_between_increases() {
+        let (state, writes) = test_state(vec![Some(50.0), Some(78.0)], Config::default());
+        for _ in 0..6 {
+            tick(&state, 2.0).unwrap();
+        }
+        assert_eq!(*writes.lock().unwrap(), vec![25, 25, 25, 25, 25, 30]);
+    }
+
+    #[test]
+    fn adaptive_holds_boost_while_cooling_then_removes_it_at_the_lower_boundary() {
         let (state, writes) = test_state(vec![Some(50.0), Some(78.0)], Config::default());
         tick(&state, 2.0).unwrap();
-        tick(&state, 2.0).unwrap();
-        assert_eq!(*writes.lock().unwrap(), vec![26, 32]);
+        for (temp, expected) in [(76.0, 25), (74.0, 25), (74.0, 30)] {
+            state.lock().device = Some(Box::new(TestDevice {
+                temps: vec![Some(50.0), Some(temp)],
+                writes: writes.clone(),
+                fail_writes: false,
+            }));
+            for _ in 0..5 {
+                tick(&state, 2.0).unwrap();
+            }
+            assert_eq!(writes.lock().unwrap().last(), Some(&expected));
+        }
+        state.lock().device = Some(Box::new(TestDevice {
+            temps: vec![Some(50.0), Some(68.0)],
+            writes: writes.clone(),
+            fail_writes: false,
+        }));
+        let sample = tick(&state, 0.0).unwrap();
+        assert_eq!(writes.lock().unwrap().last(), Some(&0));
+        assert_eq!(sample.control.unwrap().applied_boosts["fan1"], 0);
     }
 
     #[test]
