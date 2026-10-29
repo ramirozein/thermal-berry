@@ -39,4 +39,4 @@ cargo test -- --ignored
 
 ## Architecture
 
-![Thermal Berry Architecture](https://cdn.weberry.site/images/open-source/thermal-berry/architecture.png)
+![Thermal Berry Architecture](https://cdn.weberry.com.mx/images/open-source/thermal-berry/architecture.png)
