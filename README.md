@@ -2,7 +2,7 @@
 
 Desktop app for monitoring and controlling fans/temperature on
 Linux laptops, with an architecture designed for third parties to add
-other vendors.
+other vendors. Zero telemetry.
 
 - **Stack:** Tauri · Rust · React · TypeScript
 
@@ -39,4 +39,4 @@ cargo test -- --ignored
 
 ## Architecture
 
-![Thermal Berry Architecture](https://cdn.weberry.site/images/open-source/thermal-berry/architecture.png)
+![Thermal Berry Architecture](https://cdn.weberry.com.mx/images/open-source/thermal-berry/architecture.png)

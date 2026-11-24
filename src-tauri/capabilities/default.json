@@ -1,12 +1,16 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "Main window",
   "windows": [
     "main"
   ],
   "permissions": [
     "core:default",
-    "opener:default"
+    "allow-get-capabilities",
+    "allow-get-metrics-snapshot",
+    "allow-get-osd-settings",
+    "allow-set-osd-settings",
+    "allow-quit-app"
   ]
 }

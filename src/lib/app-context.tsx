@@ -3,6 +3,7 @@ import {
     useCallback,
     useContext,
     useEffect,
+    useMemo,
     useState,
     useRef,
     type ReactNode,
@@ -10,28 +11,33 @@ import {
 import * as ipc from "./ipc";
 import type {Config, DeviceInfo, FanMode, TempUnit, UpdateInfo} from "./ipc";
 
-interface AppContextValue {
-    config: Config | null;
-    control: ipc.ControlStatus | null;
-    actionError: string | null;
-    dismissError: () => void;
+interface DeviceContextValue {
+    capabilities: ipc.Capabilities | null;
     device: DeviceInfo | null;
     deviceError: ipc.ThermalError | null;
-    updateInfo: UpdateInfo | null;
+    refreshDevice: () => Promise<void>;
+}
+
+interface ControlActions {
     updateConfig: (patch: ipc.ConfigPatch) => Promise<void>;
     cancelManualAdjustments: () => void;
     setFanBoost: (fanId: string, percent: number, expectedEpoch: number) => Promise<void>;
     setMode: (mode: FanMode) => Promise<void>;
     setAllFansBoost: (enabled: boolean, percent: number) => Promise<void>;
-    refreshDevice: () => Promise<void>;
 }
 
-const AppContext = createContext<AppContextValue | null>(null);
+const DeviceContext = createContext<DeviceContextValue | null>(null);
+const ConfigContext = createContext<Config | null>(null);
+const ControlContext = createContext<ipc.ControlStatus | null>(null);
+const ControlActionsContext = createContext<ControlActions | null>(null);
+const ActionFeedbackContext = createContext<{actionError: string | null; dismissError: () => void} | null>(null);
+const UpdateInfoContext = createContext<UpdateInfo | null>(null);
 
 export function AppProvider({children}: { children: ReactNode }) {
     const [snapshot, setSnapshot] = useState<ipc.StateSnapshot | null>(null);
     const config = snapshot?.config ?? null;
     const [actionError, setActionError] = useState<string | null>(null);
+    const dismissError = useCallback(() => setActionError(null), []);
     const manualSession = useRef(0);
     const cancelManualAdjustments = useCallback(() => { manualSession.current += 1; }, []);
     const pending = useRef<Promise<void>>(Promise.resolve());
@@ -57,22 +63,38 @@ export function AppProvider({children}: { children: ReactNode }) {
         pending.current = task.catch(() => {});
         return task;
     }, [refreshState]);
-    const [device, setDevice] = useState<DeviceInfo | null>(null);
+    const [capabilities, setCapabilities] = useState<ipc.Capabilities | null>(null);
+    const device = capabilities?.device ?? null;
     const [deviceError, setDeviceError] = useState<ipc.ThermalError | null>(null);
     const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
 
     const refreshDevice = useCallback(async () => {
         try {
-            setDevice(await ipc.getDeviceInfo());
-            setDeviceError(null);
+            const next = await ipc.getCapabilities();
+            setCapabilities(next);
+            setDeviceError(next.linuxMaintenance && !next.device
+                ? {kind: "device_not_found", message: "No supported thermal device was found on this system"}
+                : null);
         } catch (e) {
-            setDevice(null);
-            if (ipc.isThermalError(e)) setDeviceError(e);
-            else setDeviceError({kind: "io", message: String(e)});
+            setCapabilities((current) => current && {
+                ...current,
+                device: null,
+                temperatures: false,
+                fanRpm: false,
+                fanControl: false,
+                writeAccess: false,
+            });
+            setDeviceError(ipc.isThermalError(e) ? e : {kind: "io", message: String(e)});
         }
     }, []);
 
     useEffect(() => {
+        void refreshDevice();
+    }, [refreshDevice]);
+
+    const isLinux = capabilities?.linuxMaintenance === true;
+    useEffect(() => {
+        if (!isLinux) return;
         let disposed = false;
         let unlisten: (() => void) | undefined;
         void (async () => {
@@ -87,13 +109,13 @@ export function AppProvider({children}: { children: ReactNode }) {
                 if (!disposed) setActionError(ipc.isThermalError(e) ? e.message : String(e));
             });
         })();
-        void refreshDevice();
         ipc.checkForUpdate().then(setUpdateInfo).catch(() => setUpdateInfo(null));
         return () => { disposed = true; unlisten?.(); };
-    }, [refreshDevice, acceptSnapshot, refreshState]);
+    }, [isLinux, acceptSnapshot, refreshState]);
 
     useEffect(() => {
         if (!config) return;
+        try { localStorage.setItem("thermal-berry-theme", config.theme); } catch {}
         const media = window.matchMedia("(prefers-color-scheme: dark)");
         const apply = () => {
             const dark =
@@ -103,7 +125,7 @@ export function AppProvider({children}: { children: ReactNode }) {
         apply();
         media.addEventListener("change", apply);
         return () => media.removeEventListener("change", apply);
-    }, [config]);
+    }, [config?.theme]);
 
     const updateConfig = useCallback((patch: ipc.ConfigPatch) => {
         if (patch.automaticControl || patch.curves) cancelManualAdjustments();
@@ -123,33 +145,57 @@ export function AppProvider({children}: { children: ReactNode }) {
         return mutate(() => ipc.setAllFansBoost(enabled, percent));
     }, [mutate, cancelManualAdjustments]);
 
-    return (
-        <AppContext.Provider
-            value={{
-                config,
-                control: snapshot?.control ?? null,
-                actionError,
-                dismissError: () => setActionError(null),
-                device,
-                deviceError,
-                updateInfo,
-                updateConfig,
-                setMode,
-                setFanBoost,
-                cancelManualAdjustments,
-                setAllFansBoost,
-                refreshDevice,
-            }}
-        >
-            {children}
-        </AppContext.Provider>
+    const deviceContext = useMemo(
+        () => ({capabilities, device, deviceError, refreshDevice}),
+        [capabilities, device, deviceError, refreshDevice],
     );
+    const actions = useMemo(
+        () => ({updateConfig, setMode, setFanBoost, cancelManualAdjustments, setAllFansBoost}),
+        [updateConfig, setMode, setFanBoost, cancelManualAdjustments, setAllFansBoost],
+    );
+    const feedback = useMemo(() => ({actionError, dismissError}), [actionError, dismissError]);
+
+    return <DeviceContext value={deviceContext}>
+        <ConfigContext value={config}>
+            <ControlContext value={snapshot?.control ?? null}>
+                <ControlActionsContext value={actions}>
+                    <ActionFeedbackContext value={feedback}>
+                        <UpdateInfoContext value={updateInfo}>{children}</UpdateInfoContext>
+                    </ActionFeedbackContext>
+                </ControlActionsContext>
+            </ControlContext>
+        </ConfigContext>
+    </DeviceContext>;
 }
 
-export function useApp() {
-    const ctx = useContext(AppContext);
-    if (!ctx) throw new Error("useApp must be used within <AppProvider>");
-    return ctx;
+export function useDevice() {
+    const context = useContext(DeviceContext);
+    if (!context) throw new Error("useDevice must be used within <AppProvider>");
+    return context;
+}
+
+export function useConfig() {
+    return useContext(ConfigContext);
+}
+
+export function useControlStatus() {
+    return useContext(ControlContext);
+}
+
+export function useControlActions() {
+    const context = useContext(ControlActionsContext);
+    if (!context) throw new Error("useControlActions must be used within <AppProvider>");
+    return context;
+}
+
+export function useActionFeedback() {
+    const context = useContext(ActionFeedbackContext);
+    if (!context) throw new Error("useActionFeedback must be used within <AppProvider>");
+    return context;
+}
+
+export function useUpdateInfo() {
+    return useContext(UpdateInfoContext);
 }
 
 export function formatTemp(celsius: number, unit: TempUnit): string {

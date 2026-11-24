@@ -1,9 +1,9 @@
-import type {ButtonHTMLAttributes, KeyboardEventHandler, ReactNode} from "react";
+import type {ComponentPropsWithRef, KeyboardEventHandler, ReactNode} from "react";
 import {cn} from "../lib/utils";
 
 type ButtonVariant = "primary" | "outline" | "ghost" | "destructive";
 
-export function Button({variant = "primary", className, ...props}: ButtonHTMLAttributes<HTMLButtonElement> & {
+export function Button({variant = "primary", className, ...props}: ComponentPropsWithRef<"button"> & {
     variant?: ButtonVariant
 }) {
     return (
@@ -88,15 +88,15 @@ export function Card({className, children}: { className?: string; children: Reac
 
 export function SettingRow({title, description, children,}: {
     title: string;
-    description: string;
-    children: ReactNode;
+    description?: string;
+    children?: ReactNode;
 }) {
     return (
         <div
             className="flex min-h-16 items-center justify-between gap-6 border-t border-border px-5 py-4">
             <div>
                 <p className="text-sm font-medium">{title}</p>
-                <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{description}</p>
+                {description && <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{description}</p>}
             </div>
             {children}
         </div>

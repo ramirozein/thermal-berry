@@ -1,174 +1,219 @@
-use std::sync::Arc;
+use std::sync::Mutex;
 
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, Runtime};
 
-use crate::commands;
-use crate::config::FanMode;
-use crate::state::AppState;
+#[cfg(target_os = "linux")]
+use crate::{commands, config::FanMode, state::AppState};
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
 
-pub const TRAY_ID: &str = "main";
-
-const MENU_STATUS: &str = "status";
+const TRAY_ID: &str = "main";
 const MENU_OPEN: &str = "open";
-const MENU_BOOST_ALL: &str = "boost_all";
-const MENU_MODE_AUTO: &str = "mode_auto";
-const MENU_MODE_DISABLED: &str = "mode_disabled";
+const MENU_OSD: &str = "osd";
 const MENU_QUIT: &str = "quit";
+#[cfg(target_os = "linux")]
+const MENU_BOOST_ALL: &str = "boost_all";
+#[cfg(target_os = "linux")]
+const MENU_MODE_AUTO: &str = "mode_auto";
+#[cfg(target_os = "linux")]
+const MENU_MODE_DISABLED: &str = "mode_disabled";
 
-/// Handles to the menu items that change after creation. Kept in Tauri's
-/// managed state so the monitor thread and commands can update them.
-///
-/// Manual mode isn't offered here on purpose: it's for tuning individual
-/// fans (Manual Control in the window), not a quick tray action. The tray
-/// only ever has one of these three checked at a time — see `sync_mode` /
-/// `sync_all_fans_boost` and the `MENU_MODE_AUTO` / `MENU_MODE_DISABLED`
-/// handlers below.
-pub struct TrayHandles<R: Runtime> {
+#[derive(Default)]
+struct Summary {
+    system: String,
+    thermal: String,
+    rendered: String,
+}
+
+struct TrayHandles<R: Runtime> {
     status: MenuItem<R>,
+    osd: CheckMenuItem<R>,
+    summary: Mutex<Summary>,
+    #[cfg(target_os = "linux")]
     boost_all: CheckMenuItem<R>,
+    #[cfg(target_os = "linux")]
     mode_auto: CheckMenuItem<R>,
+    #[cfg(target_os = "linux")]
     mode_disabled: CheckMenuItem<R>,
 }
 
-/// Builds the tray icon with its menu. The window close button hides to the
-/// tray (configured in lib.rs); the only way to quit the app is the tray's
-/// Quit entry, so background monitoring/curve control keeps running.
-pub fn setup(app: &AppHandle, state: Arc<AppState>) -> tauri::Result<()> {
-    let (mode, boost_all_enabled) = {
-        let inner = state.lock();
-        (inner.config.mode, inner.config.all_fans_boost.enabled)
-    };
-
-    let status = MenuItem::with_id(app, MENU_STATUS, "Starting…", false, None::<&str>)?;
+pub fn setup(app: &AppHandle) -> tauri::Result<()> {
+    let status = MenuItem::with_id(app, "status", "Starting…", false, None::<&str>)?;
     let open = MenuItem::with_id(app, MENU_OPEN, "Open Thermal Berry", true, None::<&str>)?;
-    let boost_all = CheckMenuItem::with_id(
+    let osd = CheckMenuItem::with_id(
         app,
-        MENU_BOOST_ALL,
-        "Boost all fans",
+        MENU_OSD,
+        "On-screen display",
         true,
-        boost_all_enabled,
-        None::<&str>,
-    )?;
-    let mode_auto = CheckMenuItem::with_id(
-        app,
-        MENU_MODE_AUTO,
-        "Auto mode",
-        true,
-        mode == FanMode::Auto,
-        None::<&str>,
-    )?;
-    let mode_disabled = CheckMenuItem::with_id(
-        app,
-        MENU_MODE_DISABLED,
-        "Disable fan control",
-        true,
-        mode == FanMode::Disabled,
+        false,
         None::<&str>,
     )?;
     let quit = MenuItem::with_id(app, MENU_QUIT, "Quit", true, None::<&str>)?;
-
     let menu = Menu::with_items(
         app,
-        &[
-            &status,
-            &PredefinedMenuItem::separator(app)?,
-            &open,
-            &PredefinedMenuItem::separator(app)?,
-            &boost_all,
-            &mode_auto,
-            &mode_disabled,
-            &PredefinedMenuItem::separator(app)?,
-            &quit,
-        ],
+        &[&status, &PredefinedMenuItem::separator(app)?, &open, &osd],
     )?;
 
-    app.manage(TrayHandles {
-        status,
-        boost_all,
-        mode_auto,
-        mode_disabled,
-    });
+    #[cfg(target_os = "linux")]
+    let (boost_all, mode_auto, mode_disabled) = {
+        let state = app.state::<Arc<AppState>>();
+        let (mode, boost_enabled) = {
+            let inner = state.lock();
+            (inner.config.mode, inner.config.all_fans_boost.enabled)
+        };
+        let boost = CheckMenuItem::with_id(
+            app,
+            MENU_BOOST_ALL,
+            "Boost all fans",
+            true,
+            boost_enabled,
+            None::<&str>,
+        )?;
+        let auto = CheckMenuItem::with_id(
+            app,
+            MENU_MODE_AUTO,
+            "Auto mode",
+            true,
+            mode == FanMode::Auto,
+            None::<&str>,
+        )?;
+        let disabled = CheckMenuItem::with_id(
+            app,
+            MENU_MODE_DISABLED,
+            "Disable fan control",
+            true,
+            mode == FanMode::Disabled,
+            None::<&str>,
+        )?;
+        menu.append_items(&[
+            &PredefinedMenuItem::separator(app)?,
+            &boost,
+            &auto,
+            &disabled,
+        ])?;
+        (boost, auto, disabled)
+    };
+    menu.append_items(&[&PredefinedMenuItem::separator(app)?, &quit])?;
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(app.default_window_icon().cloned().expect("bundled icon"))
         .tooltip("Thermal Berry")
         .menu(&menu)
         .show_menu_on_left_click(true)
-        .on_menu_event(move |app, event| match event.id().as_ref() {
+        .on_menu_event(|app, event| match event.id().as_ref() {
             MENU_OPEN => show_main_window(app),
-            MENU_QUIT => app.exit(0),
-            MENU_BOOST_ALL => {
-                let (enabled, percent) = {
-                    let inner = state.lock();
-                    (
-                        !inner.config.all_fans_boost.enabled,
-                        inner.config.all_fans_boost.percent,
-                    )
-                };
-                if let Err(e) = commands::apply_all_fans_boost(&state, enabled, percent) {
-                    commands::report_control_error(&state, &e);
-                    eprintln!("thermal-berry: tray could not toggle boost: {e}");
-                }
-                commands::publish_state(app, &state);
-            }
-            MENU_MODE_AUTO => {
-                // Only one mode is ever active: picking Auto also turns off
-                // the boost-all switch, so the items never disagree.
-                let percent = state.lock().config.all_fans_boost.percent;
-                if let Err(e) = commands::apply_all_fans_boost(&state, false, percent) {
-                    commands::report_control_error(&state, &e);
-                    eprintln!("thermal-berry: tray could not set auto mode: {e}");
-                }
-                commands::publish_state(app, &state);
-            }
-            MENU_MODE_DISABLED => {
-                if let Err(e) = commands::apply_mode(&state, FanMode::Disabled) {
-                    commands::report_control_error(&state, &e);
-                    eprintln!("thermal-berry: tray could not disable fan control: {e}");
-                }
-                commands::publish_state(app, &state);
-            }
+            MENU_QUIT => crate::lifecycle::quit(app),
+            MENU_OSD => crate::osd::toggle_from_tray(app),
+            #[cfg(target_os = "linux")]
+            id @ (MENU_BOOST_ALL | MENU_MODE_AUTO | MENU_MODE_DISABLED) => apply_control(app, id),
             _ => {}
         })
         .build(app)?;
+
+    app.manage(TrayHandles {
+        status,
+        osd,
+        summary: Mutex::new(Summary::default()),
+        #[cfg(target_os = "linux")]
+        boost_all,
+        #[cfg(target_os = "linux")]
+        mode_auto,
+        #[cfg(target_os = "linux")]
+        mode_disabled,
+    });
     Ok(())
 }
 
+pub fn available(app: &AppHandle) -> bool {
+    app.tray_by_id(TRAY_ID).is_some()
+}
+
 pub fn show_main_window(app: &AppHandle) {
-    if let Some(window) = app.webview_windows().values().next() {
+    if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
 }
 
-/// Reflects the active mode in the tray's check items.
+#[cfg(target_os = "linux")]
+fn apply_control(app: &AppHandle, id: &str) {
+    let state = app.state::<Arc<AppState>>();
+    let result = if id == MENU_MODE_DISABLED {
+        commands::apply_mode(&state, FanMode::Disabled)
+    } else {
+        let (enabled, percent) = {
+            let inner = state.lock();
+            (
+                id == MENU_BOOST_ALL && !inner.config.all_fans_boost.enabled,
+                inner.config.all_fans_boost.percent,
+            )
+        };
+        commands::apply_all_fans_boost(&state, enabled, percent)
+    };
+    if let Err(error) = result {
+        commands::report_control_error(&state, &error);
+        eprintln!("thermal-berry: tray control failed: {error}");
+    }
+    commands::publish_state(app, &state);
+}
+
+#[cfg(target_os = "linux")]
 pub fn sync_mode<R: Runtime>(app: &AppHandle<R>, mode: FanMode) {
-    let Some(handles) = app.try_state::<TrayHandles<R>>() else {
-        return;
-    };
-    let _ = handles.mode_auto.set_checked(mode == FanMode::Auto);
-    let _ = handles.mode_disabled.set_checked(mode == FanMode::Disabled);
-}
-
-/// Reflects the "boost all fans" switch in the tray's check item. Called
-/// after the tray toggles it and after Settings changes it via `set_config`.
-pub fn sync_all_fans_boost<R: Runtime>(app: &AppHandle<R>, enabled: bool) {
-    let Some(handles) = app.try_state::<TrayHandles<R>>() else {
-        return;
-    };
-    let _ = handles.boost_all.set_checked(enabled);
-}
-
-/// Updates the status line at the top of the tray menu and the icon tooltip.
-/// Called by the monitor thread on each tick.
-pub fn update_status<R: Runtime>(app: &AppHandle<R>, text: &str) {
     if let Some(handles) = app.try_state::<TrayHandles<R>>() {
-        let _ = handles.status.set_text(text);
+        let _ = handles.mode_auto.set_checked(mode == FanMode::Auto);
+        let _ = handles.mode_disabled.set_checked(mode == FanMode::Disabled);
     }
-    if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        let _ = tray.set_tooltip(Some(text));
+}
+
+#[cfg(target_os = "linux")]
+pub fn sync_all_fans_boost<R: Runtime>(app: &AppHandle<R>, enabled: bool) {
+    if let Some(handles) = app.try_state::<TrayHandles<R>>() {
+        let _ = handles.boost_all.set_checked(enabled);
     }
+}
+
+pub fn sync_osd(app: &AppHandle, enabled: bool) {
+    if let Some(handles) = app.try_state::<TrayHandles<tauri::Wry>>() {
+        let _ = handles.osd.set_checked(enabled);
+    }
+}
+
+pub fn update_system_status(app: &AppHandle, text: String) {
+    update_summary(app, Some(text), None);
+}
+
+#[cfg(target_os = "linux")]
+pub fn update_status(app: &AppHandle, text: &str) {
+    update_summary(app, None, Some(text.into()));
+}
+
+fn update_summary(app: &AppHandle, system: Option<String>, thermal: Option<String>) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(handles) = handle.try_state::<TrayHandles<tauri::Wry>>() {
+            let mut summary = handles.summary.lock().unwrap();
+            if let Some(system) = system {
+                summary.system = system;
+            }
+            if let Some(thermal) = thermal {
+                summary.thermal = thermal;
+            }
+            let text = [summary.system.as_str(), summary.thermal.as_str()]
+                .into_iter()
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · ");
+            if summary.rendered == text {
+                return;
+            }
+            summary.rendered = text.clone();
+            let _ = handles.status.set_text(&text);
+            if let Some(tray) = handle.tray_by_id(TRAY_ID) {
+                let _ = tray.set_tooltip(Some(text));
+            }
+        }
+    });
 }

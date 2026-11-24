@@ -3,9 +3,14 @@ name: Release
 on:
   push:
     branches: [ master ]
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: thermal-berry-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   check-version:
@@ -15,9 +20,10 @@ jobs:
       version: ${{ steps.check.outputs.version }}
       should_release: ${{ steps.check.outputs.should_release }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Check version
         id: check
@@ -28,28 +34,46 @@ jobs:
             echo "::error::package.json version ($VERSION) and src-tauri/tauri.conf.json version ($TAURI_VERSION) don't match. Bump both to the same value."
             exit 1
           fi
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::The release version must be numeric major.minor.patch."
+            exit 1
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
           if git rev-parse "refs/tags/v$VERSION" >/dev/null 2>&1; then
             echo "should_release=false" >> "$GITHUB_OUTPUT"
-            echo "v$VERSION is already released; skipping."
+            echo "Tag v$VERSION already exists. Automatic publication will be skipped."
           else
             echo "should_release=true" >> "$GITHUB_OUTPUT"
           fi
 
-  release:
+  build:
     needs: check-version
-    if: needs.check-version.outputs.should_release == 'true'
-    runs-on: ubuntu-22.04
+    if: github.event_name == 'workflow_dispatch' || needs.check-version.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-22.04
+            packages: src-tauri/target/release/bundle/release-assets/*
+          - platform: windows
+            runner: windows-latest
+            packages: src-tauri/target/release/bundle/nsis/*-setup.exe
+          - platform: macos
+            runner: macos-15
+            packages: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
@@ -58,11 +82,16 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
+      - name: Install macOS Rust targets
+        if: matrix.platform == 'macos'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri
 
       - name: Install Linux build dependencies
+        if: matrix.platform == 'linux'
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -75,42 +104,139 @@ jobs:
             librsvg2-dev \
             libssl-dev \
             patchelf \
-            file
+            file \
+            apt-utils
 
       - name: Install frontend dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
-      - name: Build and bundle
-        run: bun run tauri build
-
-      - name: Generate checksums
+      - name: Test Linux
+        if: matrix.platform == 'linux'
         run: |
-          BUNDLE_DIR="src-tauri/target/release/bundle"
-          (
-            cd "$BUNDLE_DIR"
-            : > SHA512SUMS
-            for f in deb/*.deb appimage/*.AppImage rpm/*.rpm; do
-              sha512sum "$f" | awk -v name="$(basename "$f")" '{print $1"  "name}' >> SHA512SUMS
-            done
-          )
+          bun run build
+          cargo test --locked --manifest-path src-tauri/Cargo.toml
+          bash tests/signed-release.sh
 
-      - name: Tag release commit
+      - name: Build Linux packages
+        if: matrix.platform == 'linux'
+        env:
+          THERMAL_BERRY_RELEASE_PUBLIC_KEY: ${{ vars.THERMAL_BERRY_RELEASE_PUBLIC_KEY }}
+        run: bun run tauri build -- --locked
+
+      - name: Collect Linux packages
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          cd src-tauri/target/release/bundle
+          mkdir -p release-assets
+          cp deb/*.deb appimage/*.AppImage rpm/*.rpm release-assets/
+
+      - name: Build Windows installer
+        if: matrix.platform == 'windows'
+        run: bun run tauri build --bundles nsis --no-sign -- --locked
+
+      - name: Build macOS disk image
+        if: matrix.platform == 'macos'
+        env:
+          APPLE_SIGNING_IDENTITY: '-'
+        run: bun run tauri build --target universal-apple-darwin --bundles app,dmg -- --locked
+
+      - name: Verify macOS application
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          app=src-tauri/target/universal-apple-darwin/release/bundle/macos/thermal-berry.app
+          codesign --verify --deep --strict "$app"
+          codesign --display --verbose=4 "$app" 2>&1 | grep -Fx 'Signature=adhoc'
+          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/thermal-berry"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: thermal-berry-${{ matrix.platform }}
+          path: ${{ matrix.packages }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+
+  sign:
+    needs: [check-version, build]
+    if: github.event_name == 'push' && needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    environment: release-signing
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: thermal-berry-*
+          path: packages
+      - name: Install APT index tooling
+        run: sudo apt-get update && sudo apt-get install -y apt-utils
+      - name: Sign artifacts and APT metadata
         env:
           VERSION: ${{ needs.check-version.outputs.version }}
-        run: |
-          git tag "v${VERSION}"
-          git push origin "v${VERSION}"
+          THERMAL_BERRY_RELEASE_PUBLIC_KEY: ${{ vars.THERMAL_BERRY_RELEASE_PUBLIC_KEY }}
+          THERMAL_BERRY_RELEASE_FINGERPRINT: ${{ vars.THERMAL_BERRY_RELEASE_FINGERPRINT }}
+          THERMAL_BERRY_RELEASE_SIGNING_KEY: ${{ secrets.THERMAL_BERRY_RELEASE_SIGNING_KEY }}
+        run: bash scripts/sign-release.sh "v$VERSION"
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa
+        with:
+          path: pages
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: signed-release
+          path: signed/
+          if-no-files-found: error
 
-      - name: Publish GitHub release
+  apt:
+    needs: sign
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e
+
+  release:
+    needs: [check-version, apt]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: signed-release
+          path: signed
+      - name: Verify and publish GitHub release
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.check-version.outputs.version }}
+          THERMAL_BERRY_RELEASE_PUBLIC_KEY: ${{ vars.THERMAL_BERRY_RELEASE_PUBLIC_KEY }}
+          THERMAL_BERRY_RELEASE_FINGERPRINT: ${{ vars.THERMAL_BERRY_RELEASE_FINGERPRINT }}
         run: |
-          BUNDLE_DIR="src-tauri/target/release/bundle"
-          gh release create "v${VERSION}" \
-            --title "v${VERSION}" \
-            --generate-notes \
-            "$BUNDLE_DIR"/deb/*.deb \
-            "$BUNDLE_DIR"/appimage/*.AppImage \
-            "$BUNDLE_DIR"/rpm/*.rpm \
-            "$BUNDLE_DIR"/SHA512SUMS
+          set -euo pipefail
+          tag="v$VERSION"
+          cd signed
+          export GNUPGHOME
+          GNUPGHOME=$(mktemp -d)
+          trap 'rm -rf -- "$GNUPGHOME"' EXIT
+          printf '%s\n' "$THERMAL_BERRY_RELEASE_PUBLIC_KEY" | gpg --batch --dearmor > "$GNUPGHOME/release.gpg"
+          keys=$(gpg --batch --show-keys --with-colons "$GNUPGHOME/release.gpg")
+          fingerprint=$(awk -F: '$1=="pub" {count++} $1=="fpr" && !fingerprint {fingerprint=$10} END {if (count != 1) exit 1; print fingerprint}' <<< "$keys")
+          [[ "$fingerprint" == "$THERMAL_BERRY_RELEASE_FINGERPRINT" ]]
+          gpgv --keyring "$GNUPGHOME/release.gpg" SHA512SUMS.sig SHA512SUMS
+          {
+            printf '# Product: thermal-berry\n# Version: %s\n' "$tag"
+            sha512sum -- *.AppImage *.rpm *-setup.exe *.dmg install.sh
+          } | cmp - SHA512SUMS
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$tag" --generate-notes \
+            *.AppImage *.rpm *-setup.exe *.dmg install.sh SHA512SUMS SHA512SUMS.sig

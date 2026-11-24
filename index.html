@@ -4,6 +4,21 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+      html { background: oklch(0.995 0.002 240); color-scheme: light; }
+    </style>
+    <script>
+      const root = document.documentElement;
+      if (window.__TAURI_INTERNALS__?.metadata?.currentWebview?.label === "osd") {
+        root.classList.add("osd");
+      } else {
+        let theme;
+        try { theme = localStorage.getItem("thermal-berry-theme"); } catch {}
+        const dark = theme === "dark" ||
+          (theme !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+        root.classList.toggle("dark", dark);
+      }
+    </script>
     <title>Thermal Berry</title>
   </head>
 

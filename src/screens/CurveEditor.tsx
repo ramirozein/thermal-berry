@@ -1,9 +1,9 @@
-import {useEffect, useMemo, useRef, useState} from "react";
+import {useMemo, useState} from "react";
 import {Button, Card, PageHeader} from "../components/ui";
 import {PermissionBanner} from "../components/PermissionBanner";
 import {isThermalError, type CurvePoint} from "../lib/ipc";
 import {defaultPoints, evaluate} from "../lib/curve";
-import {formatTemp, useApp} from "../lib/app-context";
+import {formatTemp, useConfig, useControlActions, useDevice} from "../lib/app-context";
 import {useTelemetry} from "../lib/telemetry";
 import {cn} from "../lib/utils";
 
@@ -11,17 +11,15 @@ const TEMP_MIN = 30;
 const TEMP_MAX = 100;
 const VIEW_W = 600;
 const VIEW_H = 280;
+const DEFAULT_POINTS = defaultPoints();
 
 const toX = (tempC: number) => ((tempC - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)) * VIEW_W;
 const toY = (percent: number) => VIEW_H - (percent / 100) * VIEW_H;
 
-// Keeps a dragged point within its neighbors (so the curve stays monotonic on X) and within [0, 100] on Y.
-function clampPoint(sorted: CurvePoint[], index: number, tempC: number, percent: number): CurvePoint {
-    const lo = index > 0 ? sorted[index - 1].tempC + 1 : TEMP_MIN;
-    const hi = index < sorted.length - 1 ? sorted[index + 1].tempC - 1 : TEMP_MAX;
+function temperatureLimits(points: CurvePoint[], index: number) {
     return {
-        tempC: Math.round(Math.min(hi, Math.max(lo, tempC))),
-        percent: Math.round(Math.min(100, Math.max(0, percent))),
+        min: Math.max(TEMP_MIN, Math.ceil((points[index - 1]?.tempC ?? TEMP_MIN - 1) + 1)),
+        max: Math.min(TEMP_MAX, Math.floor((points[index + 1]?.tempC ?? TEMP_MAX + 1) - 1)),
     };
 }
 
@@ -30,8 +28,7 @@ function CurveGraph({points, onChange, disabled,}: {
     onChange: (points: CurvePoint[]) => void;
     disabled: boolean;
 }) {
-    const svgRef = useRef<SVGSVGElement>(null);
-    const [dragIndex, setDragIndex] = useState<number | null>(null);
+    const [drag, setDrag] = useState<{index: number; pointerId: number} | null>(null);
 
     const sorted = useMemo(
         () => [...points].sort((a, b) => a.tempC - b.tempC),
@@ -49,34 +46,20 @@ function CurveGraph({points, onChange, disabled,}: {
         ].join(" ");
     }, [sorted]);
 
-    const moveTo = (index: number, clientX: number, clientY: number) => {
-        const svg = svgRef.current;
-        if (!svg) return;
-        const rect = svg.getBoundingClientRect();
-        const tempC = TEMP_MIN + ((clientX - rect.left) / rect.width) * (TEMP_MAX - TEMP_MIN);
-        const percent = 100 - ((clientY - rect.top) / rect.height) * 100;
-        const clamped = clampPoint(sorted, index, tempC, percent);
-        onChange(sorted.map((p, i) => (i === index ? clamped : p)));
+    const updatePoint = (index: number, patch: Partial<CurvePoint>) => {
+        const point = sorted[index];
+        const {min, max} = temperatureLimits(sorted, index);
+        const tempC = patch.tempC === undefined || min > max ? point.tempC
+            : Math.min(max, Math.max(min, Math.round(patch.tempC)));
+        const percent = patch.percent === undefined ? point.percent
+            : Math.min(100, Math.max(0, Math.round(patch.percent)));
+        if (tempC === point.tempC && percent === point.percent) return;
+        onChange(sorted.map((p, i) => i === index ? {tempC, percent} : p));
     };
 
-    useEffect(() => {
-        if (dragIndex === null) return;
-        const onMove = (e: PointerEvent) => moveTo(dragIndex, e.clientX, e.clientY);
-        const onUp = () => setDragIndex(null);
-        window.addEventListener("pointermove", onMove);
-        window.addEventListener("pointerup", onUp);
-        return () => {
-            window.removeEventListener("pointermove", onMove);
-            window.removeEventListener("pointerup", onUp);
-        };
-    }, [dragIndex, sorted]);
-
     return (
-        <div
-            className="relative h-72 border-b border-l border-border"
-            role="img"
-            aria-label="Editable temperature-to-boost curve"
-        >
+        <div className="relative mb-10 ml-9 h-72 border-b border-l border-border"
+             role="group" aria-label="Temperature-to-boost curve">
             <div className="absolute inset-0 flex flex-col justify-between" aria-hidden="true">
                 {[0, 1, 2, 3, 4].map((i) => (
                     <div key={i} className="border-t border-border/70"/>
@@ -88,10 +71,21 @@ function CurveGraph({points, onChange, disabled,}: {
                 ))}
             </div>
             <svg
-                ref={svgRef}
                 className="absolute inset-0 size-full overflow-visible"
                 viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
                 preserveAspectRatio="none"
+                onPointerMove={(event) => {
+                    if (disabled || drag?.pointerId !== event.pointerId) return;
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    if (!rect.width || !rect.height) return;
+                    updatePoint(drag.index, {
+                        tempC: TEMP_MIN + ((event.clientX - rect.left) / rect.width) * (TEMP_MAX - TEMP_MIN),
+                        percent: 100 - ((event.clientY - rect.top) / rect.height) * 100,
+                    });
+                }}
+                onLostPointerCapture={(event) => {
+                    if (drag?.pointerId === event.pointerId) setDrag(null);
+                }}
             >
                 <polyline
                     points={polyline}
@@ -110,11 +104,30 @@ function CurveGraph({points, onChange, disabled,}: {
                         stroke="var(--primary)"
                         strokeWidth="3"
                         vectorEffect="non-scaling-stroke"
-                        className={cn(!disabled && "cursor-grab", dragIndex === i && "cursor-grabbing")}
-                        onPointerDown={(e) => {
+                        tabIndex={disabled ? undefined : 0}
+                        role="group"
+                        aria-label={`Point ${i + 1}: ${p.tempC} degrees Celsius, ${p.percent}% boost`}
+                        aria-keyshortcuts={disabled ? undefined : "ArrowLeft ArrowRight ArrowUp ArrowDown"}
+                        className={cn(
+                            !disabled && "touch-none cursor-grab focus-visible:stroke-foreground",
+                            drag?.index === i && "cursor-grabbing",
+                        )}
+                        onKeyDown={(event) => {
                             if (disabled) return;
-                            e.preventDefault();
-                            setDragIndex(i);
+                            switch (event.key) {
+                                case "ArrowLeft": updatePoint(i, {tempC: p.tempC - 1}); break;
+                                case "ArrowRight": updatePoint(i, {tempC: p.tempC + 1}); break;
+                                case "ArrowDown": updatePoint(i, {percent: p.percent - 1}); break;
+                                case "ArrowUp": updatePoint(i, {percent: p.percent + 1}); break;
+                                default: return;
+                            }
+                            event.preventDefault();
+                        }}
+                        onPointerDown={(event) => {
+                            if (disabled || drag || event.button !== 0) return;
+                            event.preventDefault();
+                            event.currentTarget.setPointerCapture(event.pointerId);
+                            setDrag({index: i, pointerId: event.pointerId});
                         }}
                     />
                 ))}
@@ -136,39 +149,35 @@ function CurveGraph({points, onChange, disabled,}: {
 }
 
 export function CurveEditor() {
-    const {config, device, setMode, updateConfig} = useApp();
+    const config = useConfig();
+    const {device} = useDevice();
+    const {setMode, updateConfig} = useControlActions();
     const {latest, healthy, control} = useTelemetry();
     const fans = device?.fans ?? [];
     const [fanId, setFanId] = useState<string | null>(null);
-    const activeFanId = fanId ?? fans[0]?.id ?? null;
-
-    const savedPoints = useMemo(() => {
-        if (!activeFanId) return defaultPoints();
-        const saved = config?.curves[activeFanId];
-        return saved && saved.length >= 2 ? saved : defaultPoints();
-    }, [config, activeFanId]);
-
-    const [points, setPoints] = useState<CurvePoint[]>(savedPoints);
-    const [dirty, setDirty] = useState(false);
+    const fanIndex = Math.max(0, fans.findIndex((fan) => fan.id === fanId));
+    const activeFan = fans[fanIndex];
+    const activeFanId = activeFan?.id ?? null;
+    const savedPoints = activeFanId ? config?.curves[activeFanId] : undefined;
+    const [curveDraft, setCurveDraft] = useState<{fanId: string; points: CurvePoint[]} | null>(null);
+    const activeDraft = curveDraft?.fanId === activeFanId ? curveDraft : null;
+    const points = activeDraft?.points ?? (savedPoints && savedPoints.length >= 2 ? savedPoints : DEFAULT_POINTS);
+    const dirty = activeDraft !== null;
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [strategy, setStrategy] = useState<"adaptive" | "curve">("adaptive");
-    const [targetTempC, setTargetTempC] = useState(70);
-    useEffect(() => {
-        if (!config) return;
-        setStrategy(config.automaticControl.strategy);
-        setTargetTempC(config.automaticControl.targetTempC);
-    }, [config?.automaticControl]);
+    const [strategyDraft, setStrategyDraft] = useState<"adaptive" | "curve" | null>(null);
+    const [targetDraft, setTargetDraft] = useState<number | null>(null);
+    const strategy = strategyDraft ?? config?.automaticControl.strategy ?? "adaptive";
+    const targetTempC = targetDraft ?? config?.automaticControl.targetTempC ?? 70;
     const settingsDirty = !!config && (strategy !== config.automaticControl.strategy || targetTempC !== config.automaticControl.targetTempC);
+    const resetDraft = () => {
+        setCurveDraft(null);
+        setStrategyDraft(null);
+        setTargetDraft(null);
+    };
 
-    useEffect(() => {
-        setPoints(savedPoints);
-        setDirty(false);
-    }, [savedPoints]);
-
-    const fanIndex = fans.findIndex((f) => f.id === activeFanId);
     const refTemp =
-        latest && fanIndex >= 0
+        latest && activeFan
             ? (latest.temps[fanIndex]?.celsius ??
                 (latest.temps.length
                     ? Math.max(...latest.temps.map((t) => t.celsius))
@@ -185,7 +194,7 @@ export function CurveEditor() {
                 ...(strategy === "curve" && activeFanId ? {curves: {[activeFanId]: points}} : {}),
             });
             await setMode("auto");
-            setDirty(false);
+            resetDraft();
         } catch (e) {
             setError(isThermalError(e) ? e.message : String(e));
         } finally {
@@ -205,14 +214,7 @@ export function CurveEditor() {
                         <Button
                             variant="outline"
                             disabled={saving || (!dirty && !settingsDirty)}
-                            onClick={() => {
-                                setPoints(savedPoints);
-                                setDirty(false);
-                                if (config) {
-                                    setStrategy(config.automaticControl.strategy);
-                                    setTargetTempC(config.automaticControl.targetTempC);
-                                }
-                            }}
+                            onClick={resetDraft}
                         >
                             Revert
                         </Button>
@@ -244,7 +246,7 @@ export function CurveEditor() {
                                 name="automatic-strategy"
                                 value={option.value}
                                 checked={strategy === option.value}
-                                onChange={() => setStrategy(option.value)}
+                                onChange={() => setStrategyDraft(option.value === config?.automaticControl.strategy ? null : option.value)}
                                 disabled={saving || !config}
                                 className="peer sr-only"
                             />
@@ -274,7 +276,10 @@ export function CurveEditor() {
                         step="1"
                         value={targetTempC}
                         disabled={saving || !config}
-                        onChange={(e) => setTargetTempC(Number(e.target.value))}
+                        onChange={(e) => {
+                            const next = e.currentTarget.valueAsNumber;
+                            setTargetDraft(next === config?.automaticControl.targetTempC ? null : next);
+                        }}
                         className="range-control mt-6 w-full"
                     />
                     <div className="mt-2 flex justify-between text-xs text-muted-foreground">
@@ -289,7 +294,13 @@ export function CurveEditor() {
                             <button
                                 key={f.id}
                                 type="button"
-                                onClick={() => setFanId(f.id)}
+                                disabled={saving}
+                                aria-pressed={f.id === activeFanId}
+                                onClick={() => {
+                                    if (f.id === activeFanId) return;
+                                    setFanId(f.id);
+                                    setCurveDraft(null);
+                                }}
                                 className={cn(
                                     "rounded-md px-3 py-1.5 text-xs font-medium",
                                     f.id === activeFanId ? "bg-background" : "text-muted-foreground",
@@ -304,10 +315,10 @@ export function CurveEditor() {
                     <div className="mb-8 flex items-start justify-between">
                         <div>
                             <h2 className="text-sm font-semibold">
-                                {fans.find((f) => f.id === activeFanId)?.label ?? "No fan"}
+                                {activeFan?.label ?? "No fan"}
                             </h2>
                             <p className="mt-1 text-xs text-muted-foreground">
-                                Drag the points to adjust the response
+                                Drag a point or focus it with Tab. Left and Right change temperature. Up and Down change boost.
                             </p>
                         </div>
                         <div className="text-right">
@@ -319,16 +330,14 @@ export function CurveEditor() {
                             <p className="mt-1 text-xs text-muted-foreground">Current response</p>
                         </div>
                     </div>
-                    <div className="ml-9 pb-7">
-                        <CurveGraph
-                            points={points}
-                            disabled={!device?.writeAccess}
-                            onChange={(next) => {
-                                setPoints(next);
-                                setDirty(true);
-                            }}
-                        />
-                    </div>
+                    <CurveGraph
+                        key={activeFanId}
+                        points={points}
+                        disabled={saving || !config || !activeFanId || !device?.writeAccess}
+                        onChange={(next) => {
+                            if (activeFanId) setCurveDraft({fanId: activeFanId, points: next});
+                        }}
+                    />
                 </Card>
             </>}
         </div>

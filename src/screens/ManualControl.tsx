@@ -3,12 +3,12 @@ import {Fan, Info, RotateCcw} from "lucide-react";
 import {Button, Card, PageHeader} from "../components/ui";
 import {PermissionBanner} from "../components/PermissionBanner";
 import {type FanInfo} from "../lib/ipc";
-import {formatTemp, useApp} from "../lib/app-context";
-import {useTelemetry} from "../lib/telemetry";
+import {formatTemp, useControlActions, useControlStatus, useDevice} from "../lib/app-context";
+import {useTelemetryReading} from "../lib/telemetry";
 
 function FanControl({fan, disabled, timers}: { fan: FanInfo; disabled: boolean; timers: Map<string, ReturnType<typeof setTimeout>> }) {
-    const {config, setFanBoost} = useApp();
-    const {latest, control} = useTelemetry();
+    const {setFanBoost} = useControlActions();
+    const {config, latest, control} = useTelemetryReading();
     const [value, setValue] = useState(config?.manualBoosts[fan.id] ?? 0);
     useEffect(() => () => {
         clearTimeout(timers.get(fan.id));
@@ -94,7 +94,9 @@ function FanControl({fan, disabled, timers}: { fan: FanInfo; disabled: boolean; 
 }
 
 export function ManualControl() {
-    const {device, setMode, control, cancelManualAdjustments} = useApp();
+    const {device} = useDevice();
+    const control = useControlStatus();
+    const {setMode, cancelManualAdjustments} = useControlActions();
     const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>()).current;
     const cancelPending = () => {
         timers.forEach(clearTimeout);

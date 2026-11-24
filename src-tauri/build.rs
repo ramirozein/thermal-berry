@@ -1,3 +1,33 @@
 fn main() {
-    tauri_build::build()
+    println!("cargo:rerun-if-env-changed=THERMAL_BERRY_RELEASE_PUBLIC_KEY");
+    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
+        tauri_build::AppManifest::new().commands(&[
+            "get_capabilities",
+            "get_metrics_snapshot",
+            "get_osd_settings",
+            "set_osd_settings",
+            "resize_osd",
+            "drag_osd",
+            "quit_app",
+            "get_device_info",
+            "get_history",
+            "get_history_range",
+            "get_config",
+            "get_state",
+            "set_config",
+            "set_fan_boost",
+            "set_all_fans_boost",
+            "set_mode",
+            "save_curve",
+            "select_vendor",
+            "check_write_access",
+            "install_udev_rule",
+            "get_autostart",
+            "set_autostart",
+            "check_for_update",
+            "install_update",
+            "uninstall_app",
+        ]),
+    ))
+    .expect("failed to build Tauri application");
 }

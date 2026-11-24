@@ -208,8 +208,6 @@ mod tests {
         let mut temp = 60.0;
         let mut percent = 0;
         let mut outputs = Vec::new();
-        // Simple thermal plant: ambient + heat load - fan cooling, with
-        // thermal inertia. Validate feedback against two sustained loads.
         for load in [70.0, 90.0] {
             for _ in 0..900 {
                 percent = control.update(temp, 70.0, 2.0, percent);

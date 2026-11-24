@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
-use crate::commands::{self, UDEV_RULE_PATH};
+use crate::commands;
 use crate::db::Db;
 use crate::state::AppState;
 use crate::thermal::ThermalError;
@@ -21,10 +21,9 @@ enum InstallMethod {
     Unknown,
 }
 
-/// Async + spawn_blocking for the same reason as `install_udev_rule`: pkexec
-/// blocks on the user's password dialog.
 #[tauri::command]
 pub async fn uninstall_app(app: AppHandle, state: State<'_, Arc<AppState>>) -> CmdResult<()> {
+    let maintenance = crate::lifecycle::Maintenance::start(&app)?;
     let state = Arc::clone(state.inner());
     let removal_app = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -38,24 +37,32 @@ pub async fn uninstall_app(app: AppHandle, state: State<'_, Arc<AppState>>) -> C
     .await
     .map_err(|e| ThermalError::Control(format!("uninstall task failed: {e}")))?;
     result?;
-    app.exit(0);
+    crate::osd::remove_preferences(&app)?;
+    maintenance.complete(false);
     Ok(())
 }
 
 fn uninstall_blocking(state: &Arc<AppState>, app: &AppHandle) -> CmdResult<()> {
     commands::begin_maintenance(state)?;
     commands::publish_state(app, state);
+    if let Some(history) = app.try_state::<crate::monitor::HistoryWriter>() {
+        history.flush();
+    }
     let result = (|| {
         let method = detect_install_method();
         run_privileged_removal(method)?;
-        // The monitor and IPC share this mutex; no connection remains open
-        // when deletion starts, and maintenance keeps subsequent ticks paused.
-        drop(state.lock().db.take());
+        state.close_database();
         if let Some(db_dir) = Db::path().and_then(|p| p.parent().map(PathBuf::from)) {
-            fs::remove_dir_all(&db_dir).map_err(|e| ThermalError::Io {
-                path: db_dir.display().to_string(),
-                source: e,
-            })?;
+            if let Err(error) = fs::remove_dir_all(&db_dir) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(ThermalError::from_io(&db_dir, error));
+                }
+            }
+        }
+        if let Some(config) = dirs::config_dir() {
+            for name in ["config.json", "config.json.migrated"] {
+                remove_file_if_present(&config.join("thermal-berry").join(name))?;
+            }
         }
         remove_autostart_entry();
         if method == InstallMethod::AppImage {
@@ -73,7 +80,7 @@ pub(crate) fn recover_after_failure(state: &AppState, error: ThermalError) -> Th
     let mut inner = state.lock();
     // Authorization cancellation resumes read-only monitoring in Disabled.
     // Once deletion starts the connection stays closed and monitoring paused.
-    inner.control.maintenance = inner.db.is_none();
+    inner.control.maintenance = inner.shutting_down || inner.db.is_none();
     let message = format!(
         "Uninstall failed: {error}. Fan control remains disabled.{}",
         if inner.control.maintenance {
@@ -104,33 +111,18 @@ fn detect_install_method() -> InstallMethod {
 }
 
 fn run_privileged_removal(method: InstallMethod) -> CmdResult<()> {
-    let purge_package = match method {
-        InstallMethod::Deb => format!("dpkg --purge {BIN_NAME}\n"),
-        InstallMethod::AppImage | InstallMethod::Unknown => String::new(),
-    };
-    let script = format!(
-        "set -e\n\
-         rm -f {UDEV_RULE_PATH}\n\
-         udevadm control --reload-rules\n\
-         udevadm trigger --subsystem-match=hwmon --action=change\n\
-         {purge_package}"
-    );
-    let status = Command::new("pkexec")
-        .arg("/bin/sh")
-        .arg("-c")
-        .arg(&script)
-        .status()
-        .map_err(|e| ThermalError::Io {
-            path: "pkexec".into(),
-            source: e,
-        })?;
-    if status.success() {
-        Ok(())
+    commands::change_udev_access(if method == InstallMethod::Deb {
+        "remove-deb"
     } else {
-        // pkexec: 126 = dialog cancelled, 127 = not authorized.
-        Err(ThermalError::PermissionDenied {
-            path: UDEV_RULE_PATH.into(),
-        })
+        "remove"
+    })
+}
+
+pub(crate) fn remove_file_if_present(path: &std::path::Path) -> CmdResult<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ThermalError::from_io(path, error)),
     }
 }
 

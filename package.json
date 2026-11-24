@@ -1,18 +1,17 @@
 {
   "name": "thermal-berry",
   "private": true,
-  "version": "1.1.4",
+  "version": "1.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "bun scripts/tauri.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/api": "^2.12.4",
-    "@tauri-apps/plugin-opener": "^2.7.2",
     "clsx": "^2.1.1",
     "lucide-react": "^1.61.0",
     "react": "^19.3.1",
@@ -25,7 +24,7 @@
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
     "typescript": "~7.0.2",
-    "vite": "^8.3.5",
+    "vite": "^8.3.7",
     "@tauri-apps/cli": "^2.12.4"
   }
 }
