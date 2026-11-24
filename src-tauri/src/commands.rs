@@ -6,6 +6,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::config::{AllFansBoost, AutomaticControl, Config, FanMode, TempUnit, Theme};
 use crate::curve::{self, CurvePoint};
+use crate::readings::now_ms;
 use crate::state::{AppState, Inner, Sample, StateSnapshot};
 use crate::thermal::{self, ThermalError};
 use crate::tray;
@@ -37,9 +38,21 @@ pub struct DeviceInfo {
 }
 
 #[tauri::command]
-pub fn get_device_info(state: State<'_, Arc<AppState>>) -> CmdResult<DeviceInfo> {
-    let inner = state.lock();
-    let device = inner.device.as_ref().ok_or(ThermalError::DeviceNotFound)?;
+pub async fn get_device_info(state: State<'_, Arc<AppState>>) -> CmdResult<DeviceInfo> {
+    let state = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let device = state
+            .lock()
+            .device
+            .clone()
+            .ok_or(ThermalError::DeviceNotFound)?;
+        Ok(device_info(device.as_ref()))
+    })
+    .await
+    .map_err(|e| ThermalError::Control(format!("device discovery task failed: {e}")))?
+}
+
+fn device_info(device: &dyn thermal::ThermalDevice) -> DeviceInfo {
     let fans: Vec<FanInfo> = device
         .fans()
         .iter()
@@ -50,7 +63,7 @@ pub fn get_device_info(state: State<'_, Arc<AppState>>) -> CmdResult<DeviceInfo>
             writable: f.is_writable(),
         })
         .collect();
-    Ok(DeviceInfo {
+    DeviceInfo {
         vendor: device.vendor_name().to_string(),
         driver: device.driver_name().to_string(),
         model: device.model(),
@@ -63,7 +76,7 @@ pub fn get_device_info(state: State<'_, Arc<AppState>>) -> CmdResult<DeviceInfo>
             .collect(),
         supports_auto_curve: device.supports_auto_curve(),
         available_vendors: thermal::VENDORS.iter().map(|v| v.to_string()).collect(),
-    })
+    }
 }
 
 #[tauri::command]
@@ -72,20 +85,24 @@ pub fn get_history(state: State<'_, Arc<AppState>>) -> Vec<Sample> {
     inner.history.iter().cloned().collect()
 }
 
-/// Historical telemetry from the database (beyond the in-RAM ring buffer),
-/// for long-range charts and stats.
 #[tauri::command]
-pub fn get_history_range(
+pub async fn get_history_range(
     state: State<'_, Arc<AppState>>,
     from_ms: u64,
     to_ms: u64,
 ) -> CmdResult<Vec<Sample>> {
-    let inner = state.lock();
-    inner
-        .db
-        .as_ref()
-        .ok_or_else(|| ThermalError::Database("database is closed".into()))?
-        .query_range(from_ms, to_ms)
+    let state = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let _history_io = state.history_io.read().unwrap();
+        let db = state
+            .lock()
+            .db
+            .clone()
+            .ok_or_else(|| ThermalError::Database("database is closed".into()))?;
+        db.query_range(from_ms, to_ms)
+    })
+    .await
+    .map_err(|e| ThermalError::Database(format!("history query task failed: {e}")))?
 }
 
 #[tauri::command]
@@ -109,7 +126,7 @@ pub fn publish_state(app: &AppHandle, state: &Arc<AppState>) {
         let snapshot = state.lock().snapshot();
         tray::sync_mode(&event_app, snapshot.config.mode);
         tray::sync_all_fans_boost(&event_app, snapshot.config.all_fans_boost.enabled);
-        if let Err(e) = event_app.emit(STATE_EVENT, snapshot) {
+        if let Err(e) = event_app.emit_to("main", STATE_EVENT, snapshot) {
             eprintln!("thermal-berry: could not emit control state: {e}");
         }
     }) {
@@ -241,13 +258,6 @@ pub fn set_config(
     let result = apply_config_patch(&state, patch);
     publish_result(&app, &state, &result);
     result
-}
-
-pub(crate) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// Hardware cannot participate in SQLite transactions. Snapshot every affected
@@ -450,12 +460,13 @@ pub fn apply_mode(state: &AppState, mode: FanMode) -> CmdResult<()> {
     transition(&mut inner, next, writes)
 }
 
-/// A loaded Manual/Disabled mode is not effective until hardware confirms it.
 pub fn restore_control(state: &AppState) {
-    let mut inner = state.lock();
+    restore_saved_mode(&mut state.lock());
+}
+
+fn restore_saved_mode(inner: &mut Inner) {
     let config = inner.config.clone();
-    let result =
-        mode_writes(&inner, &config).and_then(|writes| transition(&mut inner, config, writes));
+    let result = mode_writes(inner, &config).and_then(|writes| transition(inner, config, writes));
     if let Err(e) = result {
         inner.control.applied_mode = None;
         inner.control.suspended = true;
@@ -506,14 +517,13 @@ pub fn save_curve(
     result
 }
 
-/// Manual fallback from Settings: forces a specific vendor.
 #[tauri::command]
 pub fn select_vendor(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
     vendor: String,
 ) -> CmdResult<DeviceInfo> {
-    let device = thermal::create_device(&vendor)?;
+    let device: Arc<dyn thermal::ThermalDevice> = Arc::from(thermal::create_device(&vendor)?);
     {
         let mut inner = state.lock();
         ensure_running(&inner)?;
@@ -523,11 +533,11 @@ pub fn select_vendor(
         next.control_epoch += 1;
         save_config(&inner, &next)?;
         inner.config = next;
-        inner.device = Some(device);
+        inner.device = Some(device.clone());
+        restore_saved_mode(&mut inner);
     }
-    restore_control(&state);
     publish_state(&app, &state);
-    get_device_info(state)
+    Ok(device_info(device.as_ref()))
 }
 
 #[tauri::command]
@@ -548,54 +558,34 @@ pub fn check_write_access(state: State<'_, Arc<AppState>>) -> bool {
 /// Async + spawn_blocking: pkexec blocks until the user answers the password
 /// dialog, which must not freeze the main thread (UI) nor pin an async worker.
 #[tauri::command]
-pub async fn install_udev_rule() -> CmdResult<()> {
+pub async fn install_udev_rule(app: AppHandle) -> CmdResult<()> {
+    let _maintenance = crate::lifecycle::Maintenance::start(&app)?;
     tauri::async_runtime::spawn_blocking(install_udev_rule_blocking)
         .await
         .map_err(|e| ThermalError::InvalidValue(format!("install task failed: {e}")))?
 }
 
 fn install_udev_rule_blocking() -> CmdResult<()> {
-    let user = std::env::var("USER")
-        .map_err(|_| ThermalError::InvalidValue("could not determine $USER".into()))?;
-    if !user
-        .chars()
-        .all(|c| c.is_alphanumeric() || ".-_".contains(c))
-    {
-        return Err(ThermalError::InvalidValue(format!("invalid user: {user}")));
-    }
-    let rule = format!(
-        "# Installed by thermal-berry: allows controlling fan boost without root (user: {user})\n\
-         ACTION==\"add|change\", SUBSYSTEM==\"hwmon\", ATTR{{name}}==\"alienware_wmi\", \
-         RUN+=\"/bin/sh -c 'chown {user} /sys%p/fan*_boost'\"\n"
-    );
-    let script = format!(
-        "set -e\n\
-         printf '%s' '{rule}' > {UDEV_RULE_PATH}\n\
-         udevadm control --reload-rules\n\
-         udevadm trigger --subsystem-match=hwmon --action=change\n",
-        rule = rule.replace('\'', "'\\''"),
-    );
-    let status = Command::new("pkexec")
-        .arg("/bin/sh")
-        .arg("-c")
-        .arg(&script)
-        .status()
-        .map_err(|e| ThermalError::Io {
-            path: "pkexec".into(),
-            source: e,
-        })?;
-    if status.success() {
+    change_udev_access("install")
+}
+
+pub(crate) fn change_udev_access(action: &str) -> CmdResult<()> {
+    let output = Command::new("/usr/bin/pkexec")
+        .args(["/bin/bash", "-c", include_str!("../../scripts/udev-access.sh"), "thermal-berry-udev", action])
+        .output()
+        .map_err(|error| ThermalError::from_io(std::path::Path::new("/usr/bin/pkexec"), error))?;
+    if output.status.success() {
         Ok(())
+    } else if matches!(output.status.code(), Some(126 | 127)) {
+        Err(ThermalError::PermissionDenied { path: UDEV_RULE_PATH.into() })
     } else {
-        // pkexec: 126 = dialog cancelled, 127 = not authorized.
-        Err(ThermalError::PermissionDenied {
-            path: UDEV_RULE_PATH.into(),
-        })
+        Err(ThermalError::Control(format!(
+            "udev maintenance failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim(),
+        )))
     }
 }
 
-/// Whether the app is registered to launch on login. On Linux this reflects
-/// the presence of the autostart .desktop file, which the plugin owns.
 #[tauri::command]
 pub fn get_autostart(app: AppHandle) -> CmdResult<bool> {
     use tauri_plugin_autostart::ManagerExt;
@@ -604,7 +594,6 @@ pub fn get_autostart(app: AppHandle) -> CmdResult<bool> {
         .map_err(|e| ThermalError::InvalidValue(format!("autostart: {e}")))
 }
 
-/// Enables or disables launching the app on login.
 #[tauri::command]
 pub fn set_autostart(app: AppHandle, enabled: bool) -> CmdResult<()> {
     use tauri_plugin_autostart::ManagerExt;

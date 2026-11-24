@@ -10,6 +10,7 @@ RELEASE_JSON=""
 WORK_DIR=""
 STAGED_APPIMAGE=""
 UPDATE_METHOD=""
+RELEASE_MANIFEST=""
 APPIMAGE_TARGET=""
 RELEASE_TAG=""
 
@@ -39,7 +40,6 @@ check_architecture() {
     local architecture
     architecture="$(uname -m)"
 
-    # Alienware laptops are x86_64 only.
     [[ "$architecture" == "x86_64" ]] \
         || die "Unsupported architecture: $architecture (Thermal Berry targets x86_64 Alienware laptops)"
 }
@@ -50,7 +50,7 @@ fetch_release() {
         endpoint="tags/$RELEASE_TAG"
     fi
     log "Fetching release info..."
-    RELEASE_JSON="$(curl -fsSL --connect-timeout 15 --max-time 60 "https://api.github.com/repos/${REPO}/releases/$endpoint")" \
+    RELEASE_JSON="$(curl -q -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 60 "https://api.github.com/repos/${REPO}/releases/$endpoint")" \
         || die "Could not reach the GitHub API"
 }
 
@@ -59,7 +59,7 @@ asset_url() {
     local url
 
     while IFS= read -r url || [[ -n "$url" ]]; do
-        if [[ "$url" =~ $pattern ]]; then
+        if [[ "$url" == "https://github.com/$REPO/releases/download/$RELEASE_TAG/"* && "$url" =~ $pattern ]]; then
             printf '%s\n' "$url"
             return 0
         fi
@@ -77,74 +77,46 @@ download_file() {
     local destination="$2"
     local description="$3"
 
-    curl -fsSL --connect-timeout 15 --max-time 600 "$url" -o "$destination" \
+    curl -q -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 600 "$url" -o "$destination" \
         || die "Could not download $description"
 }
 
-verify_checksum() {
-    local file="$1"
-    local name="$2"
-    local sums_file="$WORK_DIR/SHA512SUMS"
-    local sums_url expected actual
-
-    if [[ ! -f "$sums_file" ]]; then
-        sums_url="$(asset_url 'SHA512SUMS$')" \
-            || die "No SHA512SUMS asset found in the latest release; refusing to install an unverified binary"
-        download_file "$sums_url" "$sums_file" "SHA512SUMS"
+verify_release_manifest() {
+    local manifest_url signature_url keyring gpg_home
+    manifest_url="$(asset_url '/SHA512SUMS$')" || die "The release has no signed manifest"
+    signature_url="$(asset_url '/SHA512SUMS\.sig$')" || die "The release has no manifest signature"
+    keyring="${THERMAL_BERRY_RELEASE_KEYRING:-}"
+    if [[ -n "${THERMAL_BERRY_RELEASE_PUBLIC_KEY:-}" ]]; then
+        require_command gpg
+        gpg_home="$WORK_DIR/gnupg"
+        mkdir -m 700 -- "$gpg_home"
+        keyring="$WORK_DIR/release.gpg"
+        printf '%s\n' "$THERMAL_BERRY_RELEASE_PUBLIC_KEY" |
+            gpg --batch --homedir "$gpg_home" --dearmor --output "$keyring"
     fi
-
-    expected="$(awk -v name="$name" '$2 == name { print $1; exit }' "$sums_file")"
-    [[ -n "$expected" ]] \
-        || die "No checksum entry found for $name in SHA512SUMS"
-
-    actual="$(sha512sum "$file" | awk '{ print $1 }')" \
-        || die "Could not calculate the checksum for $name"
-    [[ "$expected" == "$actual" ]] \
-        || die "Checksum verification failed for $name (expected $expected, got $actual) - possible tampering, aborting"
+    [[ "$keyring" == /* && -f "$keyring" ]] ||
+        die "Set THERMAL_BERRY_RELEASE_KEYRING to the absolute path of a verified public keyring"
+    RELEASE_MANIFEST="$WORK_DIR/SHA512SUMS"
+    download_file "$manifest_url" "$RELEASE_MANIFEST" "release manifest"
+    download_file "$signature_url" "$WORK_DIR/SHA512SUMS.sig" "release signature"
+    mkdir -m 700 -- "$WORK_DIR/verify"
+    gpgv --homedir "$WORK_DIR/verify" --keyring "$keyring" "$WORK_DIR/SHA512SUMS.sig" "$RELEASE_MANIFEST" ||
+        die "The release manifest signature is invalid"
+    [[ "$(sed -n '1p' "$RELEASE_MANIFEST")" == "# Product: $BIN_NAME" &&
+       "$(sed -n '2p' "$RELEASE_MANIFEST")" == "# Version: $RELEASE_TAG" ]] ||
+        die "The signed manifest does not match the requested version"
 }
 
 download_and_verify() {
-    local url="$1"
-    local destination="$2"
-    local description="$3"
-    local name="${url##*/}"
-
-    log "Downloading $description..."
-    download_file "$url" "$destination" "$description"
-    log "Verifying checksum..."
-    verify_checksum "$destination" "$name"
-}
-
-install_deb() {
-    local url="$1"
-    local package="$WORK_DIR/package.deb"
-    local status
-
-    download_and_verify "$url" "$package" ".deb package"
-    require_command dpkg-query
-
-    if [[ "$UPDATE_METHOD" == "deb" ]]; then
-        require_command pkexec
-        require_command apt-get
-        log "Installing update (authorize in the system dialog)..."
-        pkexec "$(command -v apt-get)" install --yes "$package" \
-            || die "Update was cancelled or the package could not be installed"
-    else
-        require_command sudo
-        log "Installing (sudo required)..."
-        if ! sudo dpkg -i "$package"; then
-            require_command apt-get
-            sudo apt-get install -f -y \
-                || die "Could not repair .deb package dependencies"
-            sudo dpkg -i "$package" \
-                || die "Could not install the .deb package after repairing dependencies"
-        fi
-    fi
-
-    status="$(dpkg-query -W -f='${Status}' "$BIN_NAME" 2>/dev/null)" \
-        || die "Could not verify installation of $BIN_NAME"
-    [[ "$status" == "install ok installed" ]] \
-        || die "$BIN_NAME is not fully installed (status: $status)"
+    local url="$1" destination="$2" name="${1##*/}" expected actual
+    [[ "$name" =~ ^[a-zA-Z0-9._+-]+\.AppImage$ ]] || die "Invalid AppImage asset name"
+    verify_release_manifest
+    expected="$(awk -v name="$name" '$2 == name { print $1; count++ } END { if (count != 1) exit 1 }' "$RELEASE_MANIFEST")" ||
+        die "The manifest must identify exactly one checksum for $name"
+    [[ "$expected" =~ ^[0-9a-f]{128}$ ]] || die "Invalid SHA-512 checksum"
+    download_file "$url" "$destination" "AppImage"
+    actual="$(sha512sum "$destination" | awk '{ print $1 }')"
+    [[ "$expected" == "$actual" ]] || die "AppImage checksum did not match the signed manifest"
 }
 
 install_appimage() {
@@ -157,11 +129,11 @@ install_appimage() {
 
     mkdir -p "$destination_dir"
     [[ -w "$destination_dir" ]] || die "Cannot update AppImage: $destination_dir is not writable"
-    download_and_verify "$url" "$appimage" "AppImage"
+    download_and_verify "$url" "$appimage"
     STAGED_APPIMAGE="$(mktemp "$destination_dir/.thermal-berry-update.XXXXXX")"
     cp -- "$appimage" "$STAGED_APPIMAGE"
     chmod 755 "$STAGED_APPIMAGE"
-    mv -f -- "$STAGED_APPIMAGE" "$destination"
+    mv -Tf -- "$STAGED_APPIMAGE" "$destination"
     STAGED_APPIMAGE=""
 
     [[ "$UPDATE_METHOD" == "appimage" ]] && return 0
@@ -189,11 +161,7 @@ main() {
     local package_url
 
     case "${1:-}" in
-        --update-deb)
-            [[ $# -eq 2 ]] || die "Usage: --update-deb RELEASE_TAG"
-            UPDATE_METHOD="deb"
-            RELEASE_TAG="$2"
-            ;;
+        --update-deb) die "Install and maintain the Debian package via the signed APT repository" ;;
         --update-appimage)
             [[ $# -eq 3 ]] || die "Usage: --update-appimage PATH RELEASE_TAG"
             UPDATE_METHOD="appimage"
@@ -205,10 +173,11 @@ main() {
         *) die "Unknown argument: $1" ;;
     esac
     if [[ -n "$UPDATE_METHOD" ]]; then
-        [[ "$RELEASE_TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "Invalid release tag: $RELEASE_TAG"
+        [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "Invalid release tag: $RELEASE_TAG"
     fi
 
     require_command curl
+    require_command gpgv
     require_command sha512sum
     require_command grep
     require_command sed
@@ -220,30 +189,12 @@ main() {
 
     fetch_release
 
-    if [[ "$UPDATE_METHOD" == "appimage" ]]; then
-        package_url="$(asset_url '\.AppImage$')" \
-            || die "No AppImage asset found for $RELEASE_TAG"
-        install_appimage "$package_url"
-    elif [[ "$UPDATE_METHOD" == "deb" ]]; then
-        package_url="$(asset_url 'amd64\.deb$')" \
-            || die "No .deb asset found for $RELEASE_TAG"
-        install_deb "$package_url"
-    elif command -v dpkg >/dev/null 2>&1; then
-        if package_url="$(asset_url 'amd64\.deb$')"; then
-            log "apt/dpkg detected, installing .deb package"
-            install_deb "$package_url"
-        else
-            log ".deb asset not available, falling back to AppImage"
-            package_url="$(asset_url '\.AppImage$')" \
-                || die "No AppImage asset found in the latest release"
-            install_appimage "$package_url"
-        fi
-    else
-        log "No dpkg found, installing portable AppImage"
-        package_url="$(asset_url '\.AppImage$')" \
-            || die "No AppImage asset found in the latest release"
-        install_appimage "$package_url"
+    if [[ -z "$RELEASE_TAG" ]]; then
+        RELEASE_TAG="$(sed -nE 's/^[[:space:]]*"tag_name":[[:space:]]*"(v[0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' <<< "$RELEASE_JSON")"
+        [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "Could not determine a stable release version"
     fi
+    package_url="$(asset_url '\.AppImage$')" || die "No AppImage asset found for $RELEASE_TAG"
+    install_appimage "$package_url"
 
     log "Thermal Berry installed. Launch it from your applications menu."
 }

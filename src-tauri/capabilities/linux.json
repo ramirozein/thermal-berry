@@ -1,0 +1,31 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "linux",
+  "description": "Linux control and maintenance in the main window",
+  "windows": [
+    "main"
+  ],
+  "platforms": [
+    "linux"
+  ],
+  "permissions": [
+    "allow-get-device-info",
+    "allow-get-history",
+    "allow-get-history-range",
+    "allow-get-config",
+    "allow-get-state",
+    "allow-set-config",
+    "allow-set-fan-boost",
+    "allow-set-all-fans-boost",
+    "allow-set-mode",
+    "allow-save-curve",
+    "allow-select-vendor",
+    "allow-check-write-access",
+    "allow-install-udev-rule",
+    "allow-get-autostart",
+    "allow-set-autostart",
+    "allow-check-for-update",
+    "allow-install-update",
+    "allow-uninstall-app"
+  ]
+}

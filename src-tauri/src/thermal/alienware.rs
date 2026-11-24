@@ -177,7 +177,6 @@ fn read_number(path: &Path) -> Result<i64> {
 mod tests {
     use super::*;
 
-    /// Requires real Alienware hardware; run with `cargo test -- --ignored`.
     #[test]
     #[ignore]
     fn detects_and_reads_real_hardware() {

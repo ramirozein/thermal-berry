@@ -1,9 +1,6 @@
 import {invoke} from "@tauri-apps/api/core";
 import {listen, type UnlistenFn} from "@tauri-apps/api/event";
 
-/**
- * Auto regulates toward a target temperature or uses advanced curves.
- */
 export type FanMode = "auto" | "manual" | "disabled";
 export type TempUnit = "celsius" | "fahrenheit";
 export type Theme = "system" | "light" | "dark";
@@ -92,8 +89,20 @@ export interface DeviceInfo {
     availableVendors: string[];
 }
 
+export interface Capabilities {
+    cpuUsage: boolean;
+    memory: boolean;
+    temperatures: boolean;
+    fanRpm: boolean;
+    fanControl: boolean;
+    writeAccess: boolean;
+    linuxMaintenance: boolean;
+    device?: DeviceInfo | null;
+}
+
 export interface UpdateInfo {
     available: boolean;
+    managedByApt: boolean;
     currentVersion: string;
     latestVersion: string;
     releaseUrl: string;
@@ -117,6 +126,7 @@ export function isThermalError(e: unknown): e is ThermalError {
     return typeof e === "object" && e !== null && "kind" in e && "message" in e;
 }
 
+export const getCapabilities = () => invoke<Capabilities>("get_capabilities");
 export const getDeviceInfo = () => invoke<DeviceInfo>("get_device_info");
 export const getHistory = () => invoke<Sample[]>("get_history");
 export const getHistoryRange = (fromMs: number, toMs: number) => invoke<Sample[]>("get_history_range", {fromMs, toMs});

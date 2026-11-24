@@ -33,6 +33,7 @@ impl Drop for UpdateGuard {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateInfo {
     pub available: bool,
+    pub managed_by_apt: bool,
     pub current_version: String,
     pub latest_version: String,
     pub release_url: String,
@@ -47,6 +48,16 @@ struct GithubRelease {
 #[tauri::command]
 pub async fn check_for_update(app: AppHandle) -> CmdResult<UpdateInfo> {
     let current_version = app.package_info().version.to_string();
+    if app.env().appimage.is_none() {
+        let managed_by_apt = is_deb_installation().await;
+        return Ok(UpdateInfo {
+            available: false,
+            managed_by_apt,
+            latest_version: current_version.clone(),
+            current_version,
+            release_url: String::new(),
+        });
+    }
     let release = latest_release().await?;
     Ok(update_info(current_version, release))
 }
@@ -83,6 +94,7 @@ fn update_info(current_version: String, release: GithubRelease) -> UpdateInfo {
 
     UpdateInfo {
         available,
+        managed_by_apt: false,
         current_version,
         latest_version,
         release_url: release.html_url,
@@ -92,12 +104,18 @@ fn update_info(current_version: String, release: GithubRelease) -> UpdateInfo {
 #[tauri::command]
 pub async fn install_update(app: AppHandle) -> CmdResult<()> {
     let guard = UpdateGuard::acquire()?;
+    let maintenance = crate::lifecycle::Maintenance::start(&app)?;
     if cfg!(debug_assertions) {
         return Err(ThermalError::InvalidValue(
             "updates are only supported in installed release builds".into(),
         ));
     }
 
+    let appimage = app.env().appimage.map(PathBuf::from).ok_or_else(|| {
+        ThermalError::InvalidValue(
+            "Only AppImage updates run in the app. Use APT for the Debian package.".into(),
+        )
+    })?;
     let release = latest_release().await?;
     let tag = release.tag_name.clone();
     if !update_info(app.package_info().version.to_string(), release).available {
@@ -105,7 +123,6 @@ pub async fn install_update(app: AppHandle) -> CmdResult<()> {
             "no newer stable version is available".into(),
         ));
     }
-    let appimage = app.env().appimage.map(PathBuf::from);
 
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = guard;
@@ -114,37 +131,28 @@ pub async fn install_update(app: AppHandle) -> CmdResult<()> {
     .await
     .map_err(|e| ThermalError::InvalidValue(format!("update task failed: {e}")))??;
 
-    app.request_restart();
+    maintenance.complete(true);
     Ok(())
 }
 
-fn install_update_blocking(appimage: Option<PathBuf>, tag: &str) -> CmdResult<()> {
+fn install_update_blocking(appimage: PathBuf, tag: &str) -> CmdResult<()> {
+    let key = option_env!("THERMAL_BERRY_RELEASE_PUBLIC_KEY")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ThermalError::InvalidValue("This build has no trusted update key.".into())
+        })?;
     let mut command = Command::new("bash");
-    command.args(["-c", INSTALLER, "thermal-berry-installer"]);
-    if let Some(path) = appimage {
-        command.arg("--update-appimage").arg(path).arg(tag);
-    } else {
-        let executable = std::env::current_exe()
-            .map_err(|e| ThermalError::from_io(std::path::Path::new("/proc/self/exe"), e))?;
-        let owner = Command::new("dpkg-query")
-            .arg("--search")
-            .arg(&executable)
-            .output()
-            .map_err(|_| {
-                ThermalError::InvalidValue(
-                    "automatic updates support AppImage and .deb installations only".into(),
-                )
-            })?;
-        if !owner.status.success()
-            || !is_deb_owner(&String::from_utf8_lossy(&owner.stdout), &executable)
-        {
-            return Err(ThermalError::InvalidValue(
-                "this executable is not installed by the thermal-berry .deb package".into(),
-            ));
-        }
-        command.args(["--update-deb", tag]);
-    }
-
+    command
+        .args([
+            "-c",
+            INSTALLER,
+            "thermal-berry-installer",
+            "--update-appimage",
+        ])
+        .arg(appimage)
+        .arg(tag)
+        .env("THERMAL_BERRY_RELEASE_PUBLIC_KEY", key)
+        .env_remove("THERMAL_BERRY_RELEASE_KEYRING");
     let output = command
         .output()
         .map_err(|e| ThermalError::from_io(std::path::Path::new("bash"), e))?;
@@ -158,6 +166,24 @@ fn install_update_blocking(appimage: Option<PathBuf>, tag: &str) -> CmdResult<()
         return Err(ThermalError::InvalidValue(message.into()));
     }
     Ok(())
+}
+
+async fn is_deb_installation() -> bool {
+    tauri::async_runtime::spawn_blocking(|| {
+        let Ok(executable) = std::env::current_exe() else {
+            return false;
+        };
+        Command::new("dpkg-query")
+            .arg("--search")
+            .arg(&executable)
+            .output()
+            .is_ok_and(|result| {
+                result.status.success()
+                    && is_deb_owner(&String::from_utf8_lossy(&result.stdout), &executable)
+            })
+    })
+    .await
+    .unwrap_or(false)
 }
 
 fn is_deb_owner(output: &str, executable: &std::path::Path) -> bool {

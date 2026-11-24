@@ -12,7 +12,6 @@ pub struct CurvePoint {
     pub percent: u8,
 }
 
-/// Default curve: quiet at idle, aggressive near throttling.
 pub fn default_points() -> Vec<CurvePoint> {
     [(40.0, 0), (60.0, 25), (75.0, 55), (85.0, 80), (95.0, 100)]
         .into_iter()
@@ -20,8 +19,6 @@ pub fn default_points() -> Vec<CurvePoint> {
         .collect()
 }
 
-/// Linearly interpolates the boost % for a temperature. Out of range,
-/// it saturates to the first/last point; with no points it returns 0 (pure auto mode).
 pub fn evaluate(points: &[CurvePoint], temp_c: f32) -> u8 {
     let mut sorted: Vec<CurvePoint> = points.to_vec();
     sorted.sort_by(|a, b| a.temp_c.total_cmp(&b.temp_c));
@@ -52,16 +49,12 @@ pub fn evaluate(points: &[CurvePoint], temp_c: f32) -> u8 {
     last.percent.min(100)
 }
 
-/// Hysteresis state per fan for curve mode.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Hysteresis {
     applied: Option<(f32, u8)>, // (temp at which it was applied, % applied)
 }
 
 impl Hysteresis {
-    /// Decides the % to apply for `temp_c`. Increases are applied immediately;
-    /// decreases only when the temperature drops HYSTERESIS_C below the
-    /// point where the current value was set, to avoid oscillation.
     pub fn update(&mut self, points: &[CurvePoint], temp_c: f32) -> u8 {
         let target = evaluate(points, temp_c);
         match self.applied {
@@ -85,14 +78,12 @@ impl Hysteresis {
     }
 }
 
-/// Conversion % (0-100) → boost value within the vendor's range.
 pub fn percent_to_boost(percent: u8, range: (u8, u8)) -> u8 {
     let (min, max) = range;
     let pct = percent.min(100) as u32;
     (min as u32 + pct * (max as u32 - min as u32) / 100) as u8
 }
 
-/// Inverse conversion, to show the current boost as %.
 pub fn boost_to_percent(boost: u8, range: (u8, u8)) -> u8 {
     let (min, max) = range;
     if max <= min {
@@ -125,7 +116,6 @@ mod tests {
 
     #[test]
     fn evaluate_interpolates_between_points() {
-        // Halfway between (60,25) and (75,55) -> 40
         assert_eq!(evaluate(&pts(), 67.5), 40);
     }
 
@@ -152,9 +142,7 @@ mod tests {
     fn hysteresis_holds_small_drops() {
         let mut h = Hysteresis::default();
         h.update(&pts(), 75.0);
-        // Drops 1°C: within the band, keeps 55%
         assert_eq!(h.update(&pts(), 74.0), 55);
-        // Drops 2°C from the applied point: recalculates now
         assert!(h.update(&pts(), 73.0) < 55);
     }
 

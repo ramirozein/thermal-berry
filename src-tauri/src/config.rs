@@ -4,10 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::curve::CurvePoint;
 
-/// `Auto` regulates temperature or applies an advanced curve; `Manual`
-/// applies a fixed per-fan percentage; `Disabled`
-/// hands every fan back to the EC once and the app doesn't touch them again
-/// until another mode is picked.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FanMode {
@@ -61,8 +57,6 @@ pub enum Theme {
     Dark,
 }
 
-/// Switch that sets every fan to the same manual boost percentage, or back
-/// to automatic (EC) control when turned off.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AllFansBoost {
@@ -116,20 +110,16 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Sanitized interval: minimum 1s to avoid saturation, maximum 60s.
     pub fn interval_secs(&self) -> u64 {
         self.update_interval_secs.clamp(1, 60)
     }
 
-    /// Sanitized retention: at least 1 day, at most 1 year.
     pub fn retention_days(&self) -> u32 {
         self.history_retention_days.clamp(1, 365)
     }
 }
 
 impl AllFansBoost {
-    /// Sanitized boost percentage, in case a stale/corrupt value ever
-    /// exceeds 100 (percent is a plain u8, not itself bounded at 100).
     pub fn percent(&self) -> u8 {
         self.percent.min(100)
     }

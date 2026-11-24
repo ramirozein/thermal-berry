@@ -36,8 +36,6 @@ pub enum ThermalError {
 }
 
 impl ThermalError {
-    /// Wraps an io::Error, promoting EACCES/EPERM to `PermissionDenied` so the
-    /// UI can offer the udev-rule fix instead of a generic failure message.
     pub fn from_io(path: &Path, source: io::Error) -> Self {
         let path = path.display().to_string();
         if source.kind() == io::ErrorKind::PermissionDenied {

@@ -1,9 +1,13 @@
+import {memo, useMemo} from "react";
 import {Check, Cpu, Fan, Thermometer} from "lucide-react";
 import {Card, PageHeader, StatusPill} from "../components/ui";
 import {LineChart} from "../components/LineChart";
-import {useTelemetry} from "../lib/telemetry";
-import {formatTemp, useApp} from "../lib/app-context";
+import {useTelemetry, useTelemetryHistory} from "../lib/telemetry";
+import {formatTemp, useConfig, useDevice} from "../lib/app-context";
 import {cn} from "../lib/utils";
+import {SystemMetricCards} from "../components/SystemMetricCards";
+import {currentTemperatures, useMetrics} from "../lib/metrics";
+import type {Sample, TempUnit} from "../lib/ipc";
 import {HISTORY_CAPACITY} from "../lib/constants";
 
 function MetricCard({label, value, unit, detail, icon: Icon}: {
@@ -28,34 +32,23 @@ function MetricCard({label, value, unit, detail, icon: Icon}: {
     );
 }
 
-export function Dashboard() {
-    const {history, latest, isStale, healthy, control} = useTelemetry();
-    const {config, device} = useApp();
-    const unit = config?.tempUnit ?? "celsius";
-    const configuredInterval = config?.updateIntervalSecs ?? 2;
-    const intervalSecs = config?.mode === "auto" ? Math.min(configuredInterval, 2) : configuredInterval;
-    const spanSecs = HISTORY_CAPACITY * intervalSecs;
-
+const DashboardReadings = memo(function DashboardReadings({latest, isStale, unit}: {
+    latest: Sample | undefined;
+    isStale: boolean;
+    unit: TempUnit;
+}) {
+    const {snapshot, now} = useMetrics();
+    const temperatures = currentTemperatures(snapshot, now);
     const tempValue = (celsius: number) => unit === "fahrenheit" ? Math.round(celsius * 1.8 + 32) : Math.round(celsius);
     const unitSuffix = unit === "fahrenheit" ? "°F" : "°C";
 
-    const modeLabel = config?.mode === "manual" ? "Manual control"
-        : config?.mode === "disabled" ? "Fan control disabled" : config?.automaticControl.strategy === "curve" ? "Automatic curves" : "Target temperature control";
-
-    const statusItems = [
-        `${modeLabel} · ${control?.appliedMode === config?.mode && healthy ? "confirmed" : "unconfirmed"}`,
-        device ? `${device.fans.length} fans` : "No fans",
-        device ? `${isStale ? 0 : latest?.temps.length ?? 0}/${device.sensors.length} sensors reporting` : "No sensors"
-    ];
-
     return (
-        <div className="flex flex-col gap-6">
-            <PageHeader title="Overview" subtitle="Live system telemetry"
-                        action={<StatusPill label={!latest ? "Waiting" : isStale ? "Stale" : healthy ? "Live" : "Degraded"} live={healthy}/>}/>
+        <>
+            <SystemMetricCards snapshot={snapshot} now={now}/>
             <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-                {latest?.temps.map((t) => (
+                {temperatures.map((t) => (
                     <MetricCard
-                        key={t.label}
+                        key={t.id}
                         label={t.label}
                         value={String(tempValue(t.celsius))}
                         unit={unitSuffix}
@@ -73,55 +66,102 @@ export function Dashboard() {
                         icon={Fan}
                     />
                 ))}
+                {latest && !temperatures.length && (
+                    <Card className="p-5 text-sm text-muted-foreground">Temperatures not available</Card>
+                )}
                 {!latest && (
                     <Card className="col-span-2 p-5 text-sm text-muted-foreground lg:col-span-4">
                         Waiting for the first reading from the monitor…
                     </Card>
                 )}
             </div>
-            <div className="grid gap-4 lg:grid-cols-2">
-                <Card className="p-5">
-                    <div className="mb-5 flex items-start justify-between">
-                        <div>
-                            <h2 className="text-sm font-semibold">Temperature</h2>
-                            <p className="mt-1 text-xs text-muted-foreground">
-                                Max across sensors · last {Math.round(spanSecs / 60)} min
-                            </p>
-                        </div>
+        </>
+    );
+});
+
+const DashboardCharts = memo(function DashboardCharts({spanSecs, unit}: {spanSecs: number; unit: TempUnit}) {
+    const history = useTelemetryHistory();
+    const endMs = history[history.length - 1]?.timestampMs ?? 0;
+    const {temperatureSeries, fanSeries} = useMemo(() => ({
+        temperatureSeries: history.map(({timestampMs, temps}) => ({
+            timestampMs,
+            value: temps.length ? Math.max(...temps.map(({celsius}) => celsius)) : null,
+        })),
+        fanSeries: history.map(({timestampMs, fans}) => {
+            const speeds = fans.flatMap(({rpm}) => rpm === null ? [] : [rpm]);
+            return {
+                timestampMs,
+                value: speeds.length ? speeds.reduce((sum, rpm) => sum + rpm, 0) / speeds.length : null,
+            };
+        }),
+    }), [history]);
+
+    return (
+        <div className="grid gap-4 lg:grid-cols-2">
+            <Card className="p-5">
+                <div className="mb-5 flex items-start justify-between">
+                    <div>
+                        <h2 className="text-sm font-semibold">Temperature</h2>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                            Max across sensors · last {Math.round(spanSecs / 60)} min
+                        </p>
                     </div>
-                    <LineChart
-                        series={history.map((s) =>
-                            s.temps.length ? Math.max(...s.temps.map((t) => t.celsius)) : null,
-                        )}
-                        min={30}
-                        max={90}
-                        spanSecs={spanSecs}
-                        formatValue={(v) => formatTemp(v, unit)}
-                    />
-                </Card>
-                <Card className="p-5">
-                    <div className="mb-5 flex items-start justify-between">
-                        <div>
-                            <h2 className="text-sm font-semibold">Fans</h2>
-                            <p className="mt-1 text-xs text-muted-foreground">Combined average</p>
-                        </div>
+                </div>
+                <LineChart
+                    label="Temperature history"
+                    series={temperatureSeries}
+                    endMs={endMs}
+                    min={30}
+                    max={90}
+                    spanSecs={spanSecs}
+                    formatValue={(v) => formatTemp(v, unit)}
+                />
+            </Card>
+            <Card className="p-5">
+                <div className="mb-5 flex items-start justify-between">
+                    <div>
+                        <h2 className="text-sm font-semibold">Fans</h2>
+                        <p className="mt-1 text-xs text-muted-foreground">Combined average</p>
                     </div>
-                    <LineChart
-                        series={history.map((s) => {
-                            const rpms = s.fans
-                                .map((f) => f.rpm)
-                                .filter((r): r is number => r !== null);
-                            return rpms.length
-                                ? rpms.reduce((a, b) => a + b, 0) / rpms.length
-                                : null;
-                        })}
-                        min={0}
-                        max={6000}
-                        spanSecs={spanSecs}
-                        formatValue={(v) => `${Math.round(v).toLocaleString()} RPM`}
-                    />
-                </Card>
-            </div>
+                </div>
+                <LineChart
+                    label="Fan speed history"
+                    series={fanSeries}
+                    endMs={endMs}
+                    min={0}
+                    max={6000}
+                    spanSecs={spanSecs}
+                    formatValue={(v) => `${Math.round(v).toLocaleString()} RPM`}
+                />
+            </Card>
+        </div>
+    );
+});
+
+export function Dashboard() {
+    const {latest, isStale, healthy, control} = useTelemetry();
+    const config = useConfig();
+    const {device} = useDevice();
+    const unit = config?.tempUnit ?? "celsius";
+    const configuredInterval = config?.updateIntervalSecs ?? 2;
+    const intervalSecs = config?.mode === "auto" ? Math.min(configuredInterval, 2) : configuredInterval;
+    const spanSecs = HISTORY_CAPACITY * intervalSecs;
+
+    const modeLabel = config?.mode === "manual" ? "Manual control"
+        : config?.mode === "disabled" ? "Fan control disabled" : config?.automaticControl.strategy === "curve" ? "Automatic curves" : "Target temperature control";
+
+    const statusItems = [
+        `${modeLabel} · ${control?.appliedMode === config?.mode && healthy ? "confirmed" : "unconfirmed"}`,
+        device ? `${device.fans.length} fans` : "No fans",
+        device ? `${isStale ? 0 : latest?.temps.length ?? 0}/${device.sensors.length} sensors reporting` : "No sensors"
+    ];
+
+    return (
+        <div className="flex flex-col gap-6">
+            <PageHeader title="Overview" subtitle="Live system telemetry"
+                        action={<StatusPill label={!latest ? "Waiting" : isStale ? "Stale" : healthy ? "Live" : "Degraded"} live={healthy}/>}/>
+            <DashboardReadings latest={latest} isStale={isStale} unit={unit}/>
+            <DashboardCharts spanSecs={spanSecs} unit={unit}/>
             <Card>
                 <div className="flex items-center justify-between p-5">
                     <div>

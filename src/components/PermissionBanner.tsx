@@ -2,14 +2,14 @@ import {useState} from "react";
 import {ShieldAlert} from "lucide-react";
 import {Button} from "./ui";
 import {installUdevRule, isThermalError} from "../lib/ipc";
-import {useApp} from "../lib/app-context";
+import {useDevice} from "../lib/app-context";
 
 export function PermissionBanner() {
-    const {device, refreshDevice} = useApp();
+    const {capabilities, refreshDevice} = useDevice();
     const [installing, setInstalling] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    if (!device || device.writeAccess) return null;
+    if (!capabilities?.fanControl || capabilities.writeAccess) return null;
 
     const install = async () => {
         setInstalling(true);

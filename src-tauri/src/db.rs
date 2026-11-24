@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
-use std::fs;
-use std::path::PathBuf;
+use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OpenFlags};
 
 use crate::config::Config;
 use crate::curve::CurvePoint;
@@ -13,9 +15,9 @@ type DbResult<T> = Result<T, ThermalError>;
 
 const MAX_RANGE_ROWS: i64 = 20_000;
 
-/// Single owner of the SQLite database.
 pub struct Db {
-    conn: Connection,
+    conn: Mutex<Connection>,
+    file: Option<PathBuf>,
 }
 
 const SCHEMA: &str = "
@@ -55,6 +57,70 @@ fn db_err(e: impl std::fmt::Display) -> ThermalError {
     ThermalError::Database(e.to_string())
 }
 
+fn prepare_private_database(path: &Path) -> std::io::Result<()> {
+    let directory = path.parent().expect("database has a parent");
+    fs::create_dir_all(
+        directory
+            .parent()
+            .expect("application directory has a parent"),
+    )?;
+    match DirBuilder::new().mode(0o700).create(directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+
+    // SAFETY: geteuid takes no arguments and returns the current effective UID.
+    let uid = unsafe { libc::geteuid() };
+    let dir = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(directory)?;
+    set_private_mode(&dir, uid, 0o700, true)?;
+
+    let file_options = || {
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        options
+    };
+    let database = file_options()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)?;
+    set_private_mode(&database, uid, 0o600, false)?;
+
+    for name in [
+        "thermal-berry.db-wal",
+        "thermal-berry.db-shm",
+        "thermal-berry.db-journal",
+    ] {
+        match file_options().open(directory.join(name)) {
+            Ok(file) => set_private_mode(&file, uid, 0o600, false)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn set_private_mode(file: &File, uid: u32, mode: u32, directory: bool) -> std::io::Result<()> {
+    let metadata = file.metadata()?;
+    if metadata.uid() != uid
+        || (directory && !metadata.is_dir())
+        || (!directory && (!metadata.is_file() || metadata.nlink() != 1))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "unsafe database path",
+        ));
+    }
+    file.set_permissions(fs::Permissions::from_mode(mode))
+}
+
 impl Db {
     pub fn path() -> Option<PathBuf> {
         dirs::data_dir().map(|dir| dir.join("thermal-berry").join("thermal-berry.db"))
@@ -62,13 +128,14 @@ impl Db {
 
     pub fn open() -> DbResult<Self> {
         let path = Self::path().ok_or_else(|| db_err("no data directory available"))?;
-        fs::create_dir_all(path.parent().unwrap()).map_err(db_err)?;
-        let conn = Connection::open(&path).map_err(db_err)?;
-        Self::init(conn, true)
+        prepare_private_database(&path).map_err(db_err)?;
+        let flags = OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        let conn = Connection::open_with_flags(&path, flags).map_err(db_err)?;
+        let mut db = Self::init(conn, true)?;
+        db.file = Some(path);
+        Ok(db)
     }
 
-    /// Fallback (and test) database: keeps the app fully functional when the
-    /// on-disk database cannot be opened, just without persistence.
     pub fn open_in_memory() -> DbResult<Self> {
         Self::init(Connection::open_in_memory().map_err(db_err)?, false)
     }
@@ -76,16 +143,43 @@ impl Db {
     fn init(conn: Connection, import_legacy: bool) -> DbResult<Self> {
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.execute_batch(SCHEMA).map_err(db_err)?;
-        let db = Self { conn };
+        let db = Self::from_connection(conn);
         if import_legacy {
             db.import_legacy_json();
         }
         Ok(db)
     }
 
+    fn from_connection(conn: Connection) -> Self {
+        Self {
+            conn: Mutex::new(conn),
+            file: None,
+        }
+    }
+
+    fn connection(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn history_writer(&self) -> DbResult<Option<Self>> {
+        self.file
+            .as_ref()
+            .map(|path| {
+                Connection::open_with_flags(
+                    path,
+                    OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+                )
+                .map(Self::from_connection)
+                .map_err(db_err)
+            })
+            .transpose()
+    }
+
     fn import_legacy_json(&self) {
         let empty: bool = self
-            .conn
+            .connection()
             .query_row("SELECT COUNT(*) = 0 FROM settings", [], |r| r.get(0))
             .unwrap_or(false);
         if !empty {
@@ -115,14 +209,17 @@ impl Db {
 
     #[cfg(test)]
     pub(crate) fn reject_writes(&self) {
-        self.conn.pragma_update(None, "query_only", true).unwrap();
+        self.connection()
+            .pragma_update(None, "query_only", true)
+            .unwrap();
     }
 
     pub fn load_config(&self) -> Config {
         let mut config = Config::default();
+        let connection = self.connection();
 
         let read = |key: &str| -> Option<String> {
-            self.conn
+            connection
                 .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
                     r.get(0)
                 })
@@ -161,10 +258,7 @@ impl Db {
             config.automatic_control = v;
         }
 
-        let mut stmt = match self
-            .conn
-            .prepare("SELECT fan_id, percent FROM manual_boosts")
-        {
+        let mut stmt = match connection.prepare("SELECT fan_id, percent FROM manual_boosts") {
             Ok(s) => s,
             Err(_) => return config,
         };
@@ -173,8 +267,7 @@ impl Db {
         }
         drop(stmt);
 
-        let mut stmt = match self
-            .conn
+        let mut stmt = match connection
             .prepare("SELECT fan_id, temp_c, percent FROM curve_points ORDER BY fan_id, position")
         {
             Ok(s) => s,
@@ -197,7 +290,8 @@ impl Db {
     }
 
     pub fn save_config(&self, config: &Config) -> DbResult<()> {
-        let tx = self.conn.unchecked_transaction().map_err(db_err)?;
+        let connection = self.connection();
+        let tx = connection.unchecked_transaction().map_err(db_err)?;
         {
             let mut upsert = tx
                 .prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)")
@@ -262,7 +356,8 @@ impl Db {
     }
 
     pub fn insert_sample(&self, sample: &Sample) -> DbResult<()> {
-        let tx = self.conn.unchecked_transaction().map_err(db_err)?;
+        let connection = self.connection();
+        let tx = connection.unchecked_transaction().map_err(db_err)?;
         {
             let mut insert = tx
                 .prepare(
@@ -298,12 +393,23 @@ impl Db {
         tx.commit().map_err(db_err)
     }
 
-    /// Reconstructs samples in [from_ms, to_ms], oldest first.
     pub fn query_range(&self, from_ms: u64, to_ms: u64) -> DbResult<Vec<Sample>> {
+        if let Some(path) = &self.file {
+            let reader = Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
+            .map_err(db_err)?;
+            return Self::read_range(&reader, from_ms, to_ms);
+        }
+        Self::read_range(&self.connection(), from_ms, to_ms)
+    }
+
+    fn read_range(connection: &Connection, from_ms: u64, to_ms: u64) -> DbResult<Vec<Sample>> {
+        let tx = connection.unchecked_transaction().map_err(db_err)?;
         let mut samples: BTreeMap<u64, Sample> = BTreeMap::new();
 
-        let mut stmt = self
-            .conn
+        let mut stmt = tx
             .prepare(
                 "SELECT timestamp_ms, label, celsius FROM temp_readings \
                  WHERE timestamp_ms BETWEEN ?1 AND ?2 ORDER BY timestamp_ms LIMIT ?3",
@@ -334,8 +440,7 @@ impl Db {
                 .push(row.1);
         }
 
-        let mut stmt = self
-            .conn
+        let mut stmt = tx
             .prepare(
                 "SELECT timestamp_ms, fan_id, label, rpm, boost_percent, max_rpm \
                  FROM fan_readings \
@@ -373,22 +478,22 @@ impl Db {
         Ok(samples.into_values().collect())
     }
 
-    /// Drops readings older than the cutoff. Called periodically by the monitor.
     pub fn purge_older_than(&self, cutoff_ms: u64) -> DbResult<()> {
-        self.conn
-            .execute(
-                "DELETE FROM temp_readings WHERE timestamp_ms < ?1",
-                [cutoff_ms as i64],
-            )
-            .map_err(db_err)?;
-        self.conn
-            .execute(
-                "DELETE FROM fan_readings WHERE timestamp_ms < ?1",
-                [cutoff_ms as i64],
-            )
-            .map_err(db_err)?;
-        self.conn
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        let connection = self.connection();
+        let tx = connection.unchecked_transaction().map_err(db_err)?;
+        tx.execute(
+            "DELETE FROM temp_readings WHERE timestamp_ms < ?1",
+            [cutoff_ms as i64],
+        )
+        .map_err(db_err)?;
+        tx.execute(
+            "DELETE FROM fan_readings WHERE timestamp_ms < ?1",
+            [cutoff_ms as i64],
+        )
+        .map_err(db_err)?;
+        tx.commit().map_err(db_err)?;
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(PASSIVE);")
             .map_err(db_err)?;
         Ok(())
     }
@@ -489,6 +594,81 @@ mod tests {
         assert_eq!(range[0].timestamp_ms, 2000);
         assert_eq!(range[0].temps[0].label, "CPU");
         assert_eq!(range[0].fans[0].rpm, Some(2200));
+    }
+
+    #[test]
+    fn an_existing_file_supports_independent_history_reads_and_writes() {
+        let path = std::env::temp_dir().join(format!(
+            "thermal-berry-history-{}-{:?}.db",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        {
+            let original = Db::init(Connection::open(&path).unwrap(), false).unwrap();
+            original.save_config(&Config::default()).unwrap();
+            original.insert_sample(&sample(100)).unwrap();
+        }
+        {
+            let mut db = Db::init(Connection::open(&path).unwrap(), false).unwrap();
+            db.file = Some(path.clone());
+            let writer = db.history_writer().unwrap().unwrap();
+            assert_eq!(db.load_config().mode, FanMode::Auto);
+            writer.insert_sample(&sample(200)).unwrap();
+
+            let connection = writer.connection();
+            let pending = connection.unchecked_transaction().unwrap();
+            pending.execute("DELETE FROM temp_readings", []).unwrap();
+            let saved = db.query_range(100, 200).unwrap();
+            assert_eq!(saved.len(), 2);
+            assert_eq!(saved[0].temps.len(), 1);
+            assert_eq!(saved[1].fans[0].rpm, Some(2200));
+        }
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn private_database_reopens_existing_history_and_rejects_symlinks() {
+        let directory = std::env::temp_dir().join(format!(
+            "thermal-berry-permissions-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        DirBuilder::new().mode(0o700).create(&directory).unwrap();
+        let data = directory.join("data");
+        let path = data.join("thermal-berry.db");
+        fs::create_dir(&data).unwrap();
+        {
+            let old = Db::init(Connection::open(&path).unwrap(), false).unwrap();
+            old.save_config(&Config::default()).unwrap();
+            old.insert_sample(&sample(100)).unwrap();
+        }
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        prepare_private_database(&path).unwrap();
+        assert_eq!(fs::metadata(&data).unwrap().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+
+        let conn = Connection::open(&path).unwrap();
+        assert!(rusqlite::version_number() >= 3_054_001);
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        let reopened = Db::init(conn, false).unwrap();
+        assert_eq!(reopened.load_config().mode, FanMode::Auto);
+        assert_eq!(reopened.query_range(100, 100).unwrap().len(), 1);
+        reopened.insert_sample(&sample(200)).unwrap();
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = data.join(format!("thermal-berry.db{suffix}"));
+            assert_eq!(fs::metadata(sidecar).unwrap().mode() & 0o777, 0o600);
+        }
+        drop(reopened);
+
+        let other = data.join("other");
+        fs::rename(&path, &other).unwrap();
+        std::os::unix::fs::symlink(&other, &path).unwrap();
+        assert!(prepare_private_database(&path).is_err());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
