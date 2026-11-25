@@ -1,6 +1,7 @@
 import {useEffect, useState, useSyncExternalStore} from "react";
 import {invoke} from "@tauri-apps/api/core";
 import {listen, type UnlistenFn} from "@tauri-apps/api/event";
+import type {TempUnit} from "./ipc";
 
 type Reading<T> = {
     value: T | null;
@@ -10,6 +11,7 @@ type Reading<T> = {
 
 type Memory = {usedBytes: number; totalBytes: number; percent: number};
 type Temperature = {id: string; label: string; celsius: number};
+type FanSpeed = {id: string; label: string; rpm: number};
 
 export type MetricsSnapshot = {
     sequence: number;
@@ -17,6 +19,12 @@ export type MetricsSnapshot = {
     memory: Reading<Memory>;
     temperatures: Reading<Temperature[]>;
     temperatureExpiresMs: number | null;
+    thermalZones?: Reading<Temperature[]>;
+    fanSpeeds?: Reading<FanSpeed[]>;
+    hardwareExpiresMs?: number | null;
+    hardwareModel?: {vendor: string; model: string} | null;
+    intervalMs: number;
+    tempUnit: TempUnit;
 };
 
 export function isNewerSequence(current: number | undefined, next: number) {
@@ -130,8 +138,9 @@ export function useOsdMetrics() {
 export function systemMetrics(snapshot: MetricsSnapshot | null, now: number) {
     const cpu = snapshot?.cpuPercent;
     const memory = snapshot?.memory;
+    const maxAgeMs = (snapshot?.intervalMs ?? 2000) * 3;
     const fresh = <T,>(reading: Reading<T> | undefined) =>
-        reading?.status === "available" && reading.timestampMs !== null && now - reading.timestampMs <= 6000;
+        reading?.status === "available" && reading.timestampMs !== null && now - reading.timestampMs <= maxAgeMs;
     const cpuValue = fresh(cpu) ? cpu?.value : null;
     const ramValue = fresh(memory) ? memory?.value : null;
     return {
@@ -141,7 +150,17 @@ export function systemMetrics(snapshot: MetricsSnapshot | null, now: number) {
     };
 }
 
+function currentValues<T>(reading: Reading<T[]> | undefined, expiresMs: number | null | undefined, now: number) {
+    return reading?.status === "available" && expiresMs != null && now <= expiresMs ? reading.value ?? [] : [];
+}
+
 export function currentTemperatures(snapshot: MetricsSnapshot | null, now: number) {
-    if (snapshot?.temperatures.status !== "available" || now > (snapshot.temperatureExpiresMs ?? 0)) return [];
-    return snapshot.temperatures.value ?? [];
+    return [
+        ...currentValues(snapshot?.temperatures, snapshot?.temperatureExpiresMs, now),
+        ...currentValues(snapshot?.thermalZones, snapshot?.hardwareExpiresMs, now),
+    ];
+}
+
+export function currentFanSpeeds(snapshot: MetricsSnapshot | null, now: number) {
+    return currentValues(snapshot?.fanSpeeds, snapshot?.hardwareExpiresMs, now);
 }

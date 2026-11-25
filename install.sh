@@ -5,6 +5,7 @@ readonly REPO="ramirozein/thermal-berry"
 readonly BIN_NAME="thermal-berry"
 readonly INSTALL_DIR="${THERMAL_BERRY_INSTALL_DIR:-$HOME/.local/bin}"
 readonly APP_DIR="$HOME/.local/share/applications"
+readonly EMBEDDED_RELEASE_KEYRING=""
 
 RELEASE_JSON=""
 WORK_DIR=""
@@ -93,6 +94,11 @@ verify_release_manifest() {
         keyring="$WORK_DIR/release.gpg"
         printf '%s\n' "$THERMAL_BERRY_RELEASE_PUBLIC_KEY" |
             gpg --batch --homedir "$gpg_home" --dearmor --output "$keyring"
+    elif [[ -z "$keyring" && -n "$EMBEDDED_RELEASE_KEYRING" ]]; then
+        require_command base64
+        keyring="$WORK_DIR/release.gpg"
+        printf '%s' "$EMBEDDED_RELEASE_KEYRING" | base64 --decode > "$keyring" ||
+            die "Could not decode the embedded release keyring"
     fi
     [[ "$keyring" == /* && -f "$keyring" ]] ||
         die "Set THERMAL_BERRY_RELEASE_KEYRING to the absolute path of a verified public keyring"

@@ -157,17 +157,7 @@ fn load_preferences(path: &Path) -> Preferences {
 
 fn save_preferences(path: Option<&Path>, preferences: &Preferences) -> Result<(), String> {
     let path = path.ok_or("OSD settings directory is unavailable")?;
-    let temporary = path.with_extension("json.tmp");
-    let data = serde_json::to_vec(preferences).map_err(|error| error.to_string())?;
-    let parent = path
-        .parent()
-        .ok_or("OSD settings directory is unavailable")?;
-    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let result = fs::write(&temporary, data).and_then(|()| fs::rename(&temporary, path));
-    if result.is_err() {
-        let _ = fs::remove_file(temporary);
-    }
-    result.map_err(|error| error.to_string())
+    crate::preferences::save_json(path, preferences)
 }
 
 fn displays(app: &AppHandle) -> Vec<(Display, Monitor)> {

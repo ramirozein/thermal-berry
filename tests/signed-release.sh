@@ -26,6 +26,7 @@ touch packages/thermal-berry-linux/fixture.rpm packages/thermal-berry-windows/fi
 cp "$root/install.sh" .
 bash "$root/scripts/sign-release.sh" v1.2.0
 
+cmp signed/install.sh pages/install.sh
 grep -qx 'Origin: Thermal Berry' pages/apt/dists/stable/Release
 grep -qx 'Version: 1.2.0' pages/apt/dists/stable/main/binary-amd64/Packages
 # Keep APT configuration, lock files, lists, and caches in the fixture.
@@ -55,8 +56,7 @@ if APT_CONFIG="$fixture/apt/config" apt-get update > apt/result 2>&1; then
 fi
 grep -qi 'not signed' apt/result
 
-unset THERMAL_BERRY_RELEASE_SIGNING_KEY THERMAL_BERRY_RELEASE_PUBLIC_KEY
-export THERMAL_BERRY_RELEASE_KEYRING="$fixture/release-keyring.gpg"
+unset THERMAL_BERRY_RELEASE_SIGNING_KEY THERMAL_BERRY_RELEASE_PUBLIC_KEY THERMAL_BERRY_RELEASE_KEYRING
 export BERRY_FIXTURE="$fixture"
 mkdir mock-bin
 cat > mock-bin/curl <<'MOCK'
@@ -72,6 +72,7 @@ while (($#)); do
     shift
 done
 case $url in
+    https://ramirozein.me/thermal-berry/install.sh) cat "$BERRY_FIXTURE/pages/install.sh" ;;
     https://api.github.com/*)
         tag=${url##*/}
         if [[ $tag == latest ]]; then tag=v1.2.0; fi
@@ -87,9 +88,18 @@ esac
 MOCK
 chmod +x mock-bin/curl
 export PATH="$fixture/mock-bin:$PATH"
+mkdir "$fixture/tmp" "$fixture/home"
+curl -fsSL https://ramirozein.me/thermal-berry/install.sh |
+    HOME="$fixture/home" TMPDIR="$fixture/tmp" THERMAL_BERRY_INSTALL_DIR="$fixture/home/.local/bin" bash
+cmp "$fixture/home/.local/bin/thermal-berry" signed/fixture.AppImage
+test -x "$fixture/home/.local/bin/thermal-berry"
+test -f "$fixture/home/.local/share/applications/thermal-berry.desktop"
+test -z "$(ls -A "$fixture/tmp")"
+
 printf 'original\n' > installed
 installer() {
-    bash install.sh --update-appimage "$fixture/installed" "$1"
+    THERMAL_BERRY_RELEASE_KEYRING="$fixture/release-keyring.gpg" \
+        bash install.sh --update-appimage "$fixture/installed" "$1"
 }
 reject() {
     local version=$1 error=$2

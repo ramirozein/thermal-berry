@@ -22,10 +22,7 @@
     "allow-select-vendor",
     "allow-check-write-access",
     "allow-install-udev-rule",
-    "allow-get-autostart",
-    "allow-set-autostart",
     "allow-check-for-update",
-    "allow-install-update",
-    "allow-uninstall-app"
+    "allow-install-update"
   ]
 }

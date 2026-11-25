@@ -1,7 +1,9 @@
 import {lazy, Suspense, useState} from "react";
+import {isTauri} from "@tauri-apps/api/core";
 import {AppProvider, useActionFeedback, useDevice} from "./lib/app-context";
 import {Button, Card, PageHeader} from "./components/ui";
 import {Sidebar} from "./components/Sidebar";
+import {TitleBar} from "./components/TitleBar";
 import {Dashboard} from "./screens/Dashboard";
 import {LiveMetrics} from "./screens/LiveMetrics";
 import {useTelemetry} from "./lib/telemetry";
@@ -31,13 +33,22 @@ function ControlFeedback() {
     </div>;
 }
 
+function SettingsFeedback() {
+    const {actionError, dismissError} = useActionFeedback();
+    if (!actionError) return null;
+    return <div role="alert" className="mb-6 rounded-xl border border-destructive/40 p-4 text-sm text-destructive">
+        <p>{actionError}</p>
+        <button className="mt-2 underline" onClick={dismissError}>Dismiss action error</button>
+    </div>;
+}
+
 function AppContent() {
     const [screen, setScreen] = useState<Screen>("dashboard");
     const {capabilities, deviceError, refreshDevice} = useDevice();
 
     if (!capabilities) {
         return (
-            <main className="min-h-screen bg-background p-8 text-foreground">
+            <main className="min-h-0 flex-1 overflow-y-auto bg-background p-8 text-foreground">
                 <div className="mx-auto flex max-w-5xl flex-col gap-6">
                     <PageHeader title="Thermal Berry" subtitle="Hardware monitoring"/>
                     <Card className="p-5 text-sm text-muted-foreground">
@@ -55,11 +66,11 @@ function AppContent() {
         ? "dashboard" : screen;
 
     return (
-        <main className="flex h-screen bg-background text-foreground">
+        <main className="flex min-h-0 flex-1 bg-background text-foreground">
             <Sidebar screen={activeScreen} onNavigate={setScreen}/>
             <div className="min-w-0 flex-1 overflow-y-auto">
                 <div className="mx-auto max-w-5xl p-5 sm:p-8">
-                    {capabilities.linuxMaintenance && <ControlFeedback/>}
+                    {capabilities.linuxMaintenance ? <ControlFeedback/> : <SettingsFeedback/>}
                     <Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading…</p>}>
                         {activeScreen === "dashboard" && (capabilities.linuxMaintenance ? <Dashboard/> : <LiveMetrics/>)}
                         {activeScreen === "manual" && <ManualControl/>}
@@ -68,7 +79,7 @@ function AppContent() {
                             <PageHeader title="On-Screen Display" subtitle="Configure the live readings overlay"/>
                             <OsdSettings/>
                         </div>}
-                        {activeScreen === "settings" && capabilities.linuxMaintenance && <Settings/>}
+                        {activeScreen === "settings" && <Settings/>}
                     </Suspense>
                 </div>
             </div>
@@ -77,5 +88,8 @@ function AppContent() {
 }
 
 export default function App() {
-    return <AppProvider><AppContent/></AppProvider>;
+    return <div className="flex h-screen flex-col">
+        {isTauri() && <TitleBar/>}
+        <AppProvider><AppContent/></AppProvider>
+    </div>;
 }

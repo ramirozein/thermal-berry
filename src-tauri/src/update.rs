@@ -104,7 +104,7 @@ fn update_info(current_version: String, release: GithubRelease) -> UpdateInfo {
 #[tauri::command]
 pub async fn install_update(app: AppHandle) -> CmdResult<()> {
     let guard = UpdateGuard::acquire()?;
-    let maintenance = crate::lifecycle::Maintenance::start(&app)?;
+    let maintenance = crate::lifecycle::Maintenance::start(&app).map_err(ThermalError::Control)?;
     if cfg!(debug_assertions) {
         return Err(ThermalError::InvalidValue(
             "updates are only supported in installed release builds".into(),

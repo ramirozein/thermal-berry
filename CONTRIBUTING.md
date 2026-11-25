@@ -2,7 +2,7 @@
 
 Contributions are welcome, including bug reports, feature proposals, documentation, tests, and code.
 
-Thermal Berry aims to have zero telemetry. Please keep this goal in mind when proposing or implementing changes.
+All contributions must follow the [project directives](AGENTS.md) on zero telemetry, external services, and security.
 
 Before opening an issue, check for existing reports. Include relevant details such as reproduction steps, expected and actual behavior, operating system, and device model. For substantial changes, open an issue to discuss the approach first.
 

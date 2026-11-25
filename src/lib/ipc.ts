@@ -15,12 +15,15 @@ export interface AllFansBoost {
     percent: number;
 }
 
-export interface Config {
-    revision: number;
-    controlEpoch: number;
+export interface GeneralConfig {
     updateIntervalSecs: number;
     tempUnit: TempUnit;
     theme: Theme;
+}
+
+export interface Config extends GeneralConfig {
+    revision: number;
+    controlEpoch: number;
     mode: FanMode;
     manualBoosts: Record<string, number>;
     curves: Record<string, CurvePoint[]>;
@@ -85,11 +88,14 @@ export interface DeviceInfo {
     fans: FanInfo[];
     sensors: string[];
     supportsAutoCurve: boolean;
+    fanControl: boolean;
     writeAccess: boolean;
     availableVendors: string[];
 }
 
 export interface Capabilities {
+    hostName: string | null;
+    platform: string;
     cpuUsage: boolean;
     memory: boolean;
     temperatures: boolean;
@@ -134,6 +140,8 @@ export const getConfig = () => invoke<Config>("get_config");
 export const getState = () => invoke<StateSnapshot>("get_state");
 export const listenState = (handler: (state: StateSnapshot) => void) => listen<StateSnapshot>("state-changed", (event) => handler(event.payload));
 export const setConfig = (patch: ConfigPatch) => invoke<void>("set_config", {patch});
+export const getPreferences = () => invoke<GeneralConfig>("get_preferences");
+export const setPreferences = (patch: Partial<GeneralConfig>) => invoke<void>("set_preferences", {patch});
 export const setFanBoost = (fanId: string, percent: number, expectedEpoch: number) => invoke<void>("set_fan_boost", {fanId, percent, expectedEpoch});
 export const setAllFansBoost = (enabled: boolean, percent: number) => invoke<void>("set_all_fans_boost", {enabled, percent});
 export const setMode = (mode: FanMode) => invoke<void>("set_mode", {mode});

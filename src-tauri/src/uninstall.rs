@@ -23,7 +23,7 @@ enum InstallMethod {
 
 #[tauri::command]
 pub async fn uninstall_app(app: AppHandle, state: State<'_, Arc<AppState>>) -> CmdResult<()> {
-    let maintenance = crate::lifecycle::Maintenance::start(&app)?;
+    let maintenance = crate::lifecycle::Maintenance::start(&app).map_err(ThermalError::Control)?;
     let state = Arc::clone(state.inner());
     let removal_app = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {

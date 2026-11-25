@@ -9,7 +9,8 @@ import {
     type ReactNode,
 } from "react";
 import * as ipc from "./ipc";
-import type {Config, DeviceInfo, FanMode, TempUnit, UpdateInfo} from "./ipc";
+import type {Config, DeviceInfo, FanMode, GeneralConfig, UpdateInfo} from "./ipc";
+export {formatTemp} from "./utils";
 
 interface DeviceContextValue {
     capabilities: ipc.Capabilities | null;
@@ -28,6 +29,7 @@ interface ControlActions {
 
 const DeviceContext = createContext<DeviceContextValue | null>(null);
 const ConfigContext = createContext<Config | null>(null);
+const GeneralConfigContext = createContext<GeneralConfig | null>(null);
 const ControlContext = createContext<ipc.ControlStatus | null>(null);
 const ControlActionsContext = createContext<ControlActions | null>(null);
 const ActionFeedbackContext = createContext<{actionError: string | null; dismissError: () => void} | null>(null);
@@ -35,7 +37,12 @@ const UpdateInfoContext = createContext<UpdateInfo | null>(null);
 
 export function AppProvider({children}: { children: ReactNode }) {
     const [snapshot, setSnapshot] = useState<ipc.StateSnapshot | null>(null);
+    const [preferences, setPreferences] = useState<GeneralConfig | null>(null);
+    const [capabilities, setCapabilities] = useState<ipc.Capabilities | null>(null);
     const config = snapshot?.config ?? null;
+    const generalConfig = config ?? preferences;
+    const isLinux = capabilities?.linuxMaintenance === true;
+    const isDesktop = capabilities?.linuxMaintenance === false;
     const [actionError, setActionError] = useState<string | null>(null);
     const dismissError = useCallback(() => setActionError(null), []);
     const manualSession = useRef(0);
@@ -47,7 +54,9 @@ export function AppProvider({children}: { children: ReactNode }) {
             return {...next, config: current?.config.revision === next.config.revision ? current.config : next.config};
         });
     }, []);
-    const refreshState = useCallback(async () => acceptSnapshot(await ipc.getState()), [acceptSnapshot]);
+    const refreshLinuxState = useCallback(async () => acceptSnapshot(await ipc.getState()), [acceptSnapshot]);
+    const refreshPreferences = useCallback(async () => setPreferences(await ipc.getPreferences()), []);
+    const refreshState = isDesktop ? refreshPreferences : refreshLinuxState;
     const mutate = useCallback((operation: () => Promise<void>) => {
         const task = pending.current.then(async () => {
             try {
@@ -63,7 +72,6 @@ export function AppProvider({children}: { children: ReactNode }) {
         pending.current = task.catch(() => {});
         return task;
     }, [refreshState]);
-    const [capabilities, setCapabilities] = useState<ipc.Capabilities | null>(null);
     const device = capabilities?.device ?? null;
     const [deviceError, setDeviceError] = useState<ipc.ThermalError | null>(null);
     const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
@@ -92,7 +100,11 @@ export function AppProvider({children}: { children: ReactNode }) {
         void refreshDevice();
     }, [refreshDevice]);
 
-    const isLinux = capabilities?.linuxMaintenance === true;
+    useEffect(() => {
+        if (!isDesktop) return;
+        void refreshPreferences().catch((e) => setActionError(ipc.isThermalError(e) ? e.message : String(e)));
+    }, [isDesktop, refreshPreferences]);
+
     useEffect(() => {
         if (!isLinux) return;
         let disposed = false;
@@ -105,32 +117,33 @@ export function AppProvider({children}: { children: ReactNode }) {
             } catch (e) {
                 if (!disposed) setActionError(ipc.isThermalError(e) ? e.message : String(e));
             }
-            if (!disposed) await refreshState().catch((e) => {
+            if (!disposed) await refreshLinuxState().catch((e) => {
                 if (!disposed) setActionError(ipc.isThermalError(e) ? e.message : String(e));
             });
         })();
         ipc.checkForUpdate().then(setUpdateInfo).catch(() => setUpdateInfo(null));
         return () => { disposed = true; unlisten?.(); };
-    }, [isLinux, acceptSnapshot, refreshState]);
+    }, [isLinux, acceptSnapshot, refreshLinuxState]);
 
+    const theme = generalConfig?.theme;
     useEffect(() => {
-        if (!config) return;
-        try { localStorage.setItem("thermal-berry-theme", config.theme); } catch {}
+        if (!theme) return;
+        try { localStorage.setItem("thermal-berry-theme", theme); } catch {}
         const media = window.matchMedia("(prefers-color-scheme: dark)");
         const apply = () => {
             const dark =
-                config.theme === "dark" || (config.theme === "system" && media.matches);
+                theme === "dark" || (theme === "system" && media.matches);
             document.documentElement.classList.toggle("dark", dark);
         };
         apply();
         media.addEventListener("change", apply);
         return () => media.removeEventListener("change", apply);
-    }, [config?.theme]);
+    }, [theme]);
 
     const updateConfig = useCallback((patch: ipc.ConfigPatch) => {
         if (patch.automaticControl || patch.curves) cancelManualAdjustments();
-        return mutate(() => ipc.setConfig(patch));
-    }, [mutate, cancelManualAdjustments]);
+        return mutate(() => isDesktop ? ipc.setPreferences(patch) : ipc.setConfig(patch));
+    }, [mutate, isDesktop, cancelManualAdjustments]);
     const setMode = useCallback((mode: FanMode) => {
         cancelManualAdjustments();
         return mutate(() => ipc.setMode(mode));
@@ -156,15 +169,17 @@ export function AppProvider({children}: { children: ReactNode }) {
     const feedback = useMemo(() => ({actionError, dismissError}), [actionError, dismissError]);
 
     return <DeviceContext value={deviceContext}>
-        <ConfigContext value={config}>
-            <ControlContext value={snapshot?.control ?? null}>
-                <ControlActionsContext value={actions}>
-                    <ActionFeedbackContext value={feedback}>
-                        <UpdateInfoContext value={updateInfo}>{children}</UpdateInfoContext>
-                    </ActionFeedbackContext>
-                </ControlActionsContext>
-            </ControlContext>
-        </ConfigContext>
+        <GeneralConfigContext value={generalConfig}>
+            <ConfigContext value={config}>
+                <ControlContext value={snapshot?.control ?? null}>
+                    <ControlActionsContext value={actions}>
+                        <ActionFeedbackContext value={feedback}>
+                            <UpdateInfoContext value={updateInfo}>{children}</UpdateInfoContext>
+                        </ActionFeedbackContext>
+                    </ControlActionsContext>
+                </ControlContext>
+            </ConfigContext>
+        </GeneralConfigContext>
     </DeviceContext>;
 }
 
@@ -176,6 +191,10 @@ export function useDevice() {
 
 export function useConfig() {
     return useContext(ConfigContext);
+}
+
+export function useGeneralConfig() {
+    return useContext(GeneralConfigContext);
 }
 
 export function useControlStatus() {
@@ -196,9 +215,4 @@ export function useActionFeedback() {
 
 export function useUpdateInfo() {
     return useContext(UpdateInfoContext);
-}
-
-export function formatTemp(celsius: number, unit: TempUnit): string {
-    if (unit === "fahrenheit") return `${Math.round(celsius * 1.8 + 32)}°F`;
-    return `${Math.round(celsius)}°C`;
 }

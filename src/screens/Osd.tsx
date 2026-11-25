@@ -1,6 +1,7 @@
 import {useLayoutEffect, useRef} from "react";
 import {invoke} from "@tauri-apps/api/core";
 import {currentTemperatures, systemMetrics, useOsdMetrics} from "../lib/metrics";
+import {formatTemp} from "../lib/utils";
 
 export function Osd() {
     const {snapshot, now, ready} = useOsdMetrics();
@@ -38,7 +39,7 @@ export function Osd() {
                 {ramDetail && <span className="col-span-2 text-[11px] text-white/85">{ramDetail}</span>}
                 {temperatures.map(({id, label, celsius}) => (
                     <span key={id} className="max-w-40 truncate" title={label}>{label}{" "}
-                        <strong>{Math.round(celsius)} °C</strong></span>
+                        <strong>{formatTemp(celsius, snapshot?.tempUnit ?? "celsius")}</strong></span>
                 ))}
             </div>
             {!temperatures.length && <p className="mt-1 text-[11px] text-white/85">Temperatures not available</p>}

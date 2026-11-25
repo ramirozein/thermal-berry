@@ -57,6 +57,21 @@ pub struct Temperature {
     pub celsius: f32,
 }
 
+#[cfg(target_os = "windows")]
+#[derive(Clone, Serialize)]
+pub(crate) struct HardwareModel {
+    pub vendor: &'static str,
+    pub model: String,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Serialize)]
+pub(crate) struct FanSpeed {
+    pub id: String,
+    pub label: String,
+    pub rpm: u32,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MetricsSnapshot {
@@ -65,6 +80,16 @@ pub struct MetricsSnapshot {
     memory: Reading<Memory>,
     temperatures: Reading<Vec<Temperature>>,
     temperature_expires_ms: Option<u64>,
+    #[cfg(target_os = "windows")]
+    thermal_zones: Reading<Vec<Temperature>>,
+    #[cfg(target_os = "windows")]
+    fan_speeds: Reading<Vec<FanSpeed>>,
+    #[cfg(target_os = "windows")]
+    hardware_expires_ms: Option<u64>,
+    #[cfg(target_os = "windows")]
+    hardware_model: Option<HardwareModel>,
+    interval_ms: u64,
+    temp_unit: crate::preferences::TempUnit,
 }
 
 impl Default for MetricsSnapshot {
@@ -76,13 +101,23 @@ impl Default for MetricsSnapshot {
             temperatures: Reading {
                 value: None,
                 timestamp_ms: None,
-                status: if cfg!(target_os = "linux") {
+                status: if cfg!(any(target_os = "linux", target_os = "windows")) {
                     ReadingStatus::Pending
                 } else {
                     ReadingStatus::Unavailable
                 },
             },
             temperature_expires_ms: None,
+            #[cfg(target_os = "windows")]
+            thermal_zones: Reading { value: None, status: ReadingStatus::Pending, timestamp_ms: None },
+            #[cfg(target_os = "windows")]
+            fan_speeds: Reading { value: None, status: ReadingStatus::Pending, timestamp_ms: None },
+            #[cfg(target_os = "windows")]
+            hardware_expires_ms: None,
+            #[cfg(target_os = "windows")]
+            hardware_model: None,
+            interval_ms: INTERVAL.as_millis() as u64,
+            temp_unit: crate::preferences::TempUnit::Celsius,
         }
     }
 }
@@ -90,12 +125,44 @@ impl Default for MetricsSnapshot {
 #[derive(Default)]
 pub struct Metrics(Mutex<MetricsSnapshot>);
 
-pub struct MetricsWorker(mpsc::Sender<()>);
+enum WorkerSignal {
+    Stop,
+    #[cfg(not(target_os = "linux"))]
+    Refresh,
+}
+
+pub struct MetricsWorker {
+    system: mpsc::Sender<WorkerSignal>,
+    #[cfg(target_os = "windows")]
+    temperatures: mpsc::Sender<WorkerSignal>,
+    #[cfg(target_os = "windows")]
+    hardware: mpsc::Sender<WorkerSignal>,
+}
 
 impl MetricsWorker {
     pub fn stop(&self) {
-        let _ = self.0.send(());
+        let _ = self.system.send(WorkerSignal::Stop);
+        #[cfg(target_os = "windows")]
+        let _ = self.temperatures.send(WorkerSignal::Stop);
+        #[cfg(target_os = "windows")]
+        let _ = self.hardware.send(WorkerSignal::Stop);
     }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn refresh(&self) {
+        let _ = self.system.send(WorkerSignal::Refresh);
+        #[cfg(target_os = "windows")]
+        let _ = self.temperatures.send(WorkerSignal::Refresh);
+        #[cfg(target_os = "windows")]
+        let _ = self.hardware.send(WorkerSignal::Refresh);
+    }
+}
+
+fn should_stop(stopped: &mpsc::Receiver<WorkerSignal>, interval: Duration) -> bool {
+    matches!(
+        stopped.recv_timeout(interval),
+        Ok(WorkerSignal::Stop) | Err(mpsc::RecvTimeoutError::Disconnected)
+    )
 }
 
 #[tauri::command]
@@ -117,6 +184,10 @@ fn publish(app: &AppHandle, change: impl FnOnce(&mut MetricsSnapshot)) {
 }
 
 pub fn spawn(app: AppHandle) -> MetricsWorker {
+    #[cfg(target_os = "windows")]
+    let temperatures = spawn_windows_temperatures(app.clone());
+    #[cfg(target_os = "windows")]
+    let hardware = spawn_windows_hardware(app.clone());
     let (stop, stopped) = mpsc::channel();
     std::thread::spawn(move || {
         let mut system = loop {
@@ -129,7 +200,7 @@ pub fn spawn(app: AppHandle) -> MetricsWorker {
                         snapshot.cpu_percent = Reading::sampled(None, timestamp);
                         snapshot.memory = Reading::sampled(None, timestamp);
                     });
-                    if stopped.recv_timeout(INTERVAL) != Err(mpsc::RecvTimeoutError::Timeout) {
+                    if should_stop(&stopped, INTERVAL) {
                         return;
                     }
                 }
@@ -138,6 +209,18 @@ pub fn spawn(app: AppHandle) -> MetricsWorker {
         system.refresh_cpu_usage();
         let mut previous_cpu = Instant::now();
         loop {
+            #[cfg(target_os = "linux")]
+            let (interval, temp_unit) = (INTERVAL, crate::preferences::TempUnit::Celsius);
+            #[cfg(not(target_os = "linux"))]
+            let (interval, temp_unit) = {
+                use crate::preferences::desktop::{get_preferences, DesktopPreferences};
+                let preferences = get_preferences(app.state::<DesktopPreferences>());
+                (
+                    Duration::from_secs(preferences.update_interval_secs),
+                    preferences.temp_unit,
+                )
+            };
+            let interval = interval.max(MINIMUM_CPU_UPDATE_INTERVAL);
             let timestamp = now_ms();
             system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
             let memory = memory_reading(system.used_memory(), system.total_memory());
@@ -164,21 +247,92 @@ pub fn spawn(app: AppHandle) -> MetricsWorker {
             );
             publish(&app, |snapshot| {
                 snapshot.memory = Reading::sampled(memory, timestamp);
+                snapshot.interval_ms = interval.as_millis() as u64;
+                snapshot.temp_unit = temp_unit;
                 if let Some(cpu) = cpu {
                     snapshot.cpu_percent = cpu;
                 }
             });
             crate::tray::update_system_status(&app, summary);
             crate::osd::refresh_position(&app);
-            if matches!(
-                stopped.recv_timeout(INTERVAL.max(MINIMUM_CPU_UPDATE_INTERVAL)),
-                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected)
-            ) {
+            if should_stop(&stopped, interval) {
                 break;
             }
         }
     });
-    MetricsWorker(stop)
+    MetricsWorker {
+        system: stop,
+        #[cfg(target_os = "windows")]
+        temperatures,
+        #[cfg(target_os = "windows")]
+        hardware,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_windows_temperatures(app: AppHandle) -> mpsc::Sender<WorkerSignal> {
+    use crate::preferences::desktop::{get_preferences, DesktopPreferences};
+    use crate::windows_temperatures;
+
+    let (stop, stopped) = mpsc::channel();
+    std::thread::spawn(move || {
+        loop {
+            let preferences = get_preferences(app.state::<DesktopPreferences>());
+            let interval = Duration::from_secs(preferences.update_interval_secs);
+            let readings: Vec<_> = windows_temperatures::gpu_temperature().into_iter().collect();
+            let available = !readings.is_empty();
+            publish_temperatures(&app, readings, now_ms(), interval, available);
+            if should_stop(&stopped, interval) {
+                break;
+            }
+        }
+    });
+    stop
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_windows_hardware(app: AppHandle) -> mpsc::Sender<WorkerSignal> {
+    use crate::preferences::desktop::{get_preferences, DesktopPreferences};
+    use crate::windows_hardware::Wmi;
+
+    let (stop, stopped) = mpsc::channel();
+    std::thread::spawn(move || {
+        let wmi = Wmi::local();
+        let model = wmi.as_ref().and_then(Wmi::hardware_model);
+        loop {
+            let preferences = get_preferences(app.state::<DesktopPreferences>());
+            let interval = Duration::from_secs(preferences.update_interval_secs);
+            let zones = wmi.as_ref().map_or(Ok(Vec::new()), Wmi::temperatures);
+            let fans = wmi.as_ref().map_or(Ok(Vec::new()), Wmi::fan_speeds);
+            let timestamp = now_ms();
+            publish(&app, |snapshot| {
+                snapshot.hardware_model.clone_from(&model);
+                snapshot.thermal_zones = hardware_reading(zones, timestamp);
+                snapshot.fan_speeds = hardware_reading(fans, timestamp);
+                snapshot.hardware_expires_ms = Some(reading_expiry(timestamp, interval));
+            });
+            if wmi.is_none() || should_stop(&stopped, interval) {
+                break;
+            }
+        }
+    });
+    stop
+}
+
+#[cfg(target_os = "windows")]
+fn hardware_reading<T>(result: windows::core::Result<Vec<T>>, timestamp: u64) -> Reading<Vec<T>> {
+    match result {
+        Ok(values) if !values.is_empty() => Reading::sampled(Some(values), timestamp),
+        Ok(_) => Reading { value: None, status: ReadingStatus::Unavailable, timestamp_ms: Some(timestamp) },
+        Err(_) => Reading::sampled(None, timestamp),
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn has_windows_fan_readings(metrics: &Metrics) -> bool {
+    let snapshot = metrics.0.lock().unwrap();
+    snapshot.hardware_expires_ms.is_some_and(|expires| now_ms() <= expires)
+        && matches!(snapshot.fan_speeds.status, ReadingStatus::Available)
 }
 
 fn memory_reading(used_bytes: u64, total_bytes: u64) -> Option<Memory> {
@@ -213,18 +367,31 @@ pub fn publish_linux_temperatures(
             }
         })
         .collect();
+    publish_temperatures(app, values, sample.timestamp_ms, interval, device_available);
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn publish_temperatures(
+    app: &AppHandle,
+    values: Vec<Temperature>,
+    timestamp_ms: u64,
+    interval: Duration,
+    device_available: bool,
+) {
     publish(app, |snapshot| {
         snapshot.temperatures =
-            Reading::sampled((!values.is_empty()).then_some(values), sample.timestamp_ms);
+            Reading::sampled((!values.is_empty()).then_some(values), timestamp_ms);
         if !device_available {
             snapshot.temperatures.status = ReadingStatus::Unavailable;
         }
-        snapshot.temperature_expires_ms = Some(
-            sample
-                .timestamp_ms
-                .saturating_add((interval.as_millis() as u64 * 5 / 2).max(5000)),
-        );
+        snapshot.temperature_expires_ms =
+            Some(reading_expiry(timestamp_ms, interval));
     });
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn reading_expiry(timestamp: u64, interval: Duration) -> u64 {
+    timestamp.saturating_add((interval.as_millis() as u64 * 5 / 2).max(5000))
 }
 
 #[cfg(test)]
