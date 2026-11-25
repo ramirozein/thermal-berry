@@ -64,12 +64,13 @@ fn device_info(device: &dyn thermal::ThermalDevice) -> DeviceInfo {
             writable: f.is_writable(),
         })
         .collect();
+    let fan_control = device.supports_fan_control() && !fans.is_empty();
     DeviceInfo {
         vendor: device.vendor_name().to_string(),
         driver: device.driver_name().to_string(),
         model: device.model(),
-        fan_control: device.supports_fan_control() && !fans.is_empty(),
-        write_access: device.supports_fan_control() && !fans.is_empty() && fans.iter().all(|f| f.writable),
+        fan_control,
+        write_access: fan_control && fans.iter().all(|fan| fan.writable),
         fans,
         sensors: device
             .sensors()
@@ -113,11 +114,18 @@ pub fn get_config(state: State<'_, Arc<AppState>>) -> Config {
 }
 
 pub(crate) fn state_supports_fan_control(state: &AppState) -> bool {
-    state.lock().device.as_ref().is_some_and(|device| device.supports_fan_control())
+    state
+        .lock()
+        .device
+        .as_ref()
+        .is_some_and(|device| device.supports_fan_control())
 }
 
 fn control_device(inner: &Inner) -> CmdResult<&dyn thermal::ThermalDevice> {
-    let device = inner.device.as_deref().ok_or(ThermalError::DeviceNotFound)?;
+    let device = inner
+        .device
+        .as_deref()
+        .ok_or(ThermalError::DeviceNotFound)?;
     if !device.supports_fan_control() {
         return Err(ThermalError::Unsupported);
     }
@@ -221,6 +229,24 @@ fn validate_config(config: &Config) -> CmdResult<()> {
 pub fn apply_config_patch(state: &AppState, patch: ConfigPatch) -> CmdResult<()> {
     let mut inner = state.lock();
     ensure_running(&inner)?;
+    if patch.automatic_control.is_some()
+        || patch.curves.is_some()
+        || patch.all_fans_boost_percent.is_some()
+    {
+        let device = control_device(&inner)?;
+        if let Some(curves) = &patch.curves {
+            let fans = device.fans();
+            if !device.supports_auto_curve()
+                || curves
+                    .keys()
+                    .any(|id| !fans.iter().any(|fan| fan.id() == id))
+            {
+                return Err(ThermalError::InvalidValue(
+                    "curve requires a supported fan".into(),
+                ));
+            }
+        }
+    }
     let mut next = inner.config.clone();
     if let Some(v) = patch.update_interval_secs {
         next.update_interval_secs = v.clamp(1, 60);
@@ -471,7 +497,11 @@ pub fn restore_control(state: &AppState) {
 }
 
 fn restore_saved_mode(inner: &mut Inner) {
-    if inner.device.as_ref().is_some_and(|device| !device.supports_fan_control()) {
+    if inner
+        .device
+        .as_ref()
+        .is_some_and(|device| !device.supports_fan_control())
+    {
         inner.control.applied_mode = None;
         inner.control.applied_boosts.clear();
         inner.control.error = None;
@@ -494,12 +524,16 @@ fn restore_saved_mode(inner: &mut Inner) {
 /// authorization. Cancellation leaves an explicit Disabled mode to retry from.
 pub(crate) fn begin_maintenance(state: &AppState) -> CmdResult<()> {
     let mut inner = state.lock();
-    let mut next = inner.config.clone();
-    next.mode = FanMode::Disabled;
-    next.all_fans_boost.enabled = false;
-    next.control_epoch += 1;
     ensure_running(&inner)?;
-    if inner.device.as_ref().is_some_and(|device| device.supports_fan_control()) {
+    if inner
+        .device
+        .as_ref()
+        .is_some_and(|device| device.supports_fan_control())
+    {
+        let mut next = inner.config.clone();
+        next.mode = FanMode::Disabled;
+        next.all_fans_boost.enabled = false;
+        next.control_epoch += 1;
         let writes = mode_writes(&inner, &next)?;
         transition(&mut inner, next, writes)?;
     }
@@ -547,12 +581,10 @@ pub fn select_vendor(
         next.vendor_override = Some(vendor);
         next.revision += 1;
         next.control_epoch += 1;
-        if let Some(previous) = inner.device.as_ref().filter(|previous| {
+        if inner.device.as_ref().is_some_and(|previous| {
             previous.supports_fan_control() && previous.vendor_name() != device.vendor_name()
         }) {
-            for fan in previous.fans() {
-                fan.set_boost(fan.boost_range().0)?;
-            }
+            return Err(ThermalError::Unsupported);
         }
         save_config(&inner, &next)?;
         inner.config = next;
@@ -582,7 +614,12 @@ pub fn check_write_access(state: State<'_, Arc<AppState>>) -> bool {
 /// dialog, which must not freeze the main thread (UI) nor pin an async worker.
 #[tauri::command]
 pub async fn install_udev_rule(app: AppHandle, state: State<'_, Arc<AppState>>) -> CmdResult<()> {
-    if !state.lock().device.as_ref().is_some_and(|device| device.driver_name() == "alienware_wmi") {
+    if !state
+        .lock()
+        .device
+        .as_ref()
+        .is_some_and(|device| device.driver_name() == "alienware_wmi")
+    {
         return Err(ThermalError::Unsupported);
     }
     let _maintenance = crate::lifecycle::Maintenance::start(&app).map_err(ThermalError::Control)?;
@@ -597,13 +634,21 @@ fn install_udev_rule_blocking() -> CmdResult<()> {
 
 pub(crate) fn change_udev_access(action: &str) -> CmdResult<()> {
     let output = Command::new("/usr/bin/pkexec")
-        .args(["/bin/bash", "-c", include_str!("../../scripts/udev-access.sh"), "thermal-berry-udev", action])
+        .args([
+            "/bin/bash",
+            "-c",
+            include_str!("../../scripts/udev-access.sh"),
+            "thermal-berry-udev",
+            action,
+        ])
         .output()
         .map_err(|error| ThermalError::from_io(std::path::Path::new("/usr/bin/pkexec"), error))?;
     if output.status.success() {
         Ok(())
     } else if matches!(output.status.code(), Some(126 | 127)) {
-        Err(ThermalError::PermissionDenied { path: UDEV_RULE_PATH.into() })
+        Err(ThermalError::PermissionDenied {
+            path: UDEV_RULE_PATH.into(),
+        })
     } else {
         Err(ThermalError::Control(format!(
             "udev maintenance failed: {}",
@@ -700,6 +745,10 @@ mod tests {
             vec![Box::new(TestSensor)]
         }
         fn supports_auto_curve(&self) -> bool {
+            true
+        }
+
+        fn supports_fan_control(&self) -> bool {
             true
         }
     }

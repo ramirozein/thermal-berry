@@ -1,6 +1,7 @@
 pub mod alienware;
 pub mod error;
 mod hwmon;
+mod thinkpad;
 
 pub use error::ThermalError;
 
@@ -13,7 +14,6 @@ pub trait Fan: Send + Sync {
     fn read_boost(&self) -> Result<u8>;
     fn set_boost(&self, value: u8) -> Result<()>;
     fn boost_range(&self) -> (u8, u8);
-    fn supports_boost(&self) -> bool { true }
     fn is_writable(&self) -> bool;
     fn max_rpm(&self) -> Option<u32>;
 }
@@ -30,10 +30,10 @@ pub trait ThermalDevice: Send + Sync {
     fn fans(&self) -> Vec<Box<dyn Fan>>;
     fn sensors(&self) -> Vec<Box<dyn TempSensor>>;
     fn supports_auto_curve(&self) -> bool;
-    fn supports_fan_control(&self) -> bool { true }
+    fn supports_fan_control(&self) -> bool;
 }
 
-pub const VENDORS: &[&str] = &["alienware", "thinkpad", "lenovo", "hp", "asus"];
+pub const VENDORS: &[&str] = &["alienware", thinkpad::VENDOR, "lenovo", "hp", "asus"];
 
 pub fn detect_device() -> Result<Box<dyn ThermalDevice>> {
     create_device("alienware").or_else(|_| Ok(Box::new(hwmon::HwmonDevice::detect(None)?)))

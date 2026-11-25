@@ -220,10 +220,7 @@ export function Settings() {
                         {[
                             ["Fans", String(device.fans.length)],
                             ["Sensors", device.sensors.join(", ") || "0"],
-                            [
-                                "Write permissions",
-                                device.fanControl ? device.writeAccess ? "Active" : "Pending" : "Read only",
-                            ],
+                            ["Fan control", device.fanControl ? device.writeAccess ? "Active" : "Permission required" : "Read only"],
                         ].map(([key, value], i) => (
                             <div
                                 key={key}
@@ -346,7 +343,7 @@ export function Settings() {
                 </SettingRow>
             </Card>
 
-            {config && (
+            {config && capabilities?.fanControl && (
                 <AllFansBoostCard
                     allFansBoost={config.allFansBoost}
                     onLiveReapply={(percent) => setAllFansBoost(true, percent)}

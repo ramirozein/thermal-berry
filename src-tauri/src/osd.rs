@@ -9,8 +9,8 @@ use tauri::{
 };
 
 const LABEL: &str = "osd";
-const WIDTH: f64 = 232.0;
-const HEIGHT: f64 = 72.0;
+const WIDTH: f64 = 240.0;
+const HEIGHT: f64 = 97.0;
 const MARGIN: f64 = 16.0;
 
 #[derive(Clone, Copy, Default, Deserialize, Serialize)]

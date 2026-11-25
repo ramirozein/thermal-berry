@@ -14,7 +14,10 @@ pub(crate) fn apply_automatic(
 ) {
     if inner.config.mode != FanMode::Auto
         || inner.control.suspended
-        || !inner.device.as_ref().is_some_and(|device| device.supports_fan_control())
+        || !inner
+            .device
+            .as_ref()
+            .is_some_and(|device| device.supports_fan_control())
     {
         return;
     }
@@ -94,7 +97,11 @@ pub(crate) fn return_to_firmware(state: &AppState) {
     let mut inner = state.lock();
     inner.shutting_down = true;
     inner.control.maintenance = true;
-    if let Some(device) = inner.device.as_ref().filter(|device| device.supports_fan_control()) {
+    if let Some(device) = inner
+        .device
+        .as_ref()
+        .filter(|device| device.supports_fan_control())
+    {
         for fan in device.fans() {
             if let Err(error) = fan.set_boost(fan.boost_range().0) {
                 eprintln!(

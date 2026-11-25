@@ -1,11 +1,12 @@
 use windows::Wdk::Graphics::Direct3D::{
     D3DKMTCloseAdapter, D3DKMTEnumAdapters2, D3DKMTQueryAdapterInfo, D3DKMT_ADAPTERINFO,
-    D3DKMT_ADAPTER_PERFDATA, D3DKMT_CLOSEADAPTER, D3DKMT_ENUMADAPTERS2,
-    D3DKMT_PHYSICAL_ADAPTER_COUNT, D3DKMT_QUERYADAPTERINFO, KMTQAITYPE_ADAPTERPERFDATA,
-    KMTQAITYPE_PHYSICALADAPTERCOUNT, KMTQUERYADAPTERINFOTYPE,
+    D3DKMT_ADAPTER_PERFDATA, D3DKMT_ADAPTER_PERFDATACAPS, D3DKMT_CLOSEADAPTER,
+    D3DKMT_ENUMADAPTERS2, D3DKMT_PHYSICAL_ADAPTER_COUNT, D3DKMT_QUERYADAPTERINFO,
+    KMTQAITYPE_ADAPTERPERFDATA, KMTQAITYPE_ADAPTERPERFDATA_CAPS, KMTQAITYPE_PHYSICALADAPTERCOUNT,
+    KMTQUERYADAPTERINFOTYPE,
 };
 
-use crate::metrics::Temperature;
+use crate::metrics::{FanSpeed, Temperature};
 
 struct Adapter(u32);
 
@@ -46,7 +47,7 @@ impl Adapter {
         unsafe { D3DKMTQueryAdapterInfo(&mut request) }.0 == 0
     }
 
-    fn highest_temperature(&self) -> Option<u32> {
+    fn physical_performance(&self) -> impl Iterator<Item = D3DKMT_ADAPTER_PERFDATA> + '_ {
         let mut count = D3DKMT_PHYSICAL_ADAPTER_COUNT::default();
         let count = if unsafe { self.query(KMTQAITYPE_PHYSICALADAPTERCOUNT, &mut count) } {
             count.Count
@@ -54,27 +55,53 @@ impl Adapter {
             1
         };
 
-        (0..count)
-            .filter_map(|index| {
-                let mut data = D3DKMT_ADAPTER_PERFDATA {
-                    PhysicalAdapterIndex: index,
+        (0..count).filter_map(|index| {
+            let mut data = D3DKMT_ADAPTER_PERFDATA {
+                PhysicalAdapterIndex: index,
+                ..Default::default()
+            };
+            unsafe { self.query(KMTQAITYPE_ADAPTERPERFDATA, &mut data) }.then_some(data)
+        })
+    }
+
+    fn fan_rpm(&self, data: &D3DKMT_ADAPTER_PERFDATA) -> Option<u32> {
+        match data.FanRPM {
+            1..=100_000 => Some(data.FanRPM),
+            0 => {
+                // Some GPUs leave the RPM field at zero because they have no fan.
+                let mut caps = D3DKMT_ADAPTER_PERFDATACAPS {
+                    PhysicalAdapterIndex: data.PhysicalAdapterIndex,
                     ..Default::default()
                 };
-                let supported = unsafe { self.query(KMTQAITYPE_ADAPTERPERFDATA, &mut data) };
-                (supported && (1..=1500).contains(&data.Temperature)).then_some(data.Temperature)
-            })
-            .max()
+                let supported = unsafe { self.query(KMTQAITYPE_ADAPTERPERFDATA_CAPS, &mut caps) };
+                (supported && (1..=100_000).contains(&caps.MaxFanRPM)).then_some(0)
+            }
+            _ => None,
+        }
     }
 }
 
-pub fn gpu_temperature() -> Option<Temperature> {
-    let decicelsius = enumerate()?
-        .iter()
-        .filter_map(Adapter::highest_temperature)
-        .max()?;
-    Some(Temperature {
+pub(crate) fn gpu_readings() -> (Option<Temperature>, Vec<FanSpeed>) {
+    let mut highest_temperature = None;
+    let mut fans = Vec::new();
+    for (adapter_index, adapter) in enumerate().unwrap_or_default().iter().enumerate() {
+        for reading in adapter.physical_performance() {
+            if (1..=1500).contains(&reading.Temperature) {
+                highest_temperature = highest_temperature.max(Some(reading.Temperature));
+            }
+            if let Some(rpm) = adapter.fan_rpm(&reading) {
+                fans.push(FanSpeed {
+                    id: format!("gpu-fan-{adapter_index}-{}", reading.PhysicalAdapterIndex),
+                    label: format!("GPU fan {}", fans.len() + 1),
+                    rpm,
+                });
+            }
+        }
+    }
+    let temperature = highest_temperature.map(|value| Temperature {
         id: "gpu".into(),
         label: "GPU temperature".into(),
-        celsius: decicelsius as f32 / 10.0,
-    })
+        celsius: value as f32 / 10.0,
+    });
+    (temperature, fans)
 }

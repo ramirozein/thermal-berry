@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
-use windows::core::{w, BSTR, PCWSTR};
+use windows::core::{w, BSTR, HRESULT, PCWSTR};
+use windows::Win32::Foundation::ERROR_TIMEOUT;
 use windows::Win32::System::{
     Com::{
         CoCreateInstance, CoInitializeEx, CoSetProxyBlanket, CoUninitialize, CLSCTX_INPROC_SERVER,
@@ -10,8 +11,9 @@ use windows::Win32::System::{
     Rpc::{RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE},
     Variant::{VariantClear, VARIANT, VT_BSTR, VT_I4, VT_UI4},
     Wmi::{
-        IWbemClassObject, IWbemLocator, IWbemServices, WbemLocator, WBEM_FLAG_CONNECT_USE_MAX_WAIT,
-        WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY,
+        IWbemClassObject, IWbemLocator, IWbemServices, WbemLocator, WBEM_E_INVALID_CLASS,
+        WBEM_E_NOT_SUPPORTED, WBEM_FLAG_CONNECT_USE_MAX_WAIT, WBEM_FLAG_FORWARD_ONLY,
+        WBEM_FLAG_RETURN_IMMEDIATELY, WBEM_S_TIMEDOUT,
     },
 };
 
@@ -80,8 +82,7 @@ impl Wmi {
             .enumerate()
             .filter_map(|(index, row)| {
                 let raw = property(row, w!("CurrentTemperature"))?.unsigned()?;
-                let celsius = raw as f32 / 10.0 - 273.15;
-                (0.0 < celsius && celsius <= 150.0).then(|| Temperature {
+                acpi_celsius(raw).map(|celsius| Temperature {
                     id: format!("acpi-zone-{index}"),
                     label: format!("ACPI thermal zone {}", index + 1),
                     celsius,
@@ -114,6 +115,11 @@ impl Wmi {
             })
             .collect())
     }
+}
+
+fn acpi_celsius(decikelvin: u32) -> Option<f32> {
+    let celsius = decikelvin as f32 / 10.0 - 273.15;
+    (0.0 < celsius && celsius <= 150.0).then_some(celsius)
 }
 
 fn connect(locator: &IWbemLocator, namespace: &str) -> Option<IWbemServices> {
@@ -156,7 +162,16 @@ fn query(
             &BSTR::from(statement),
             WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
             None,
-        )?
+        )
+    };
+    let cursor = match cursor {
+        Err(error)
+            if error.code().0 == WBEM_E_INVALID_CLASS.0
+                || error.code().0 == WBEM_E_NOT_SUPPORTED.0 =>
+        {
+            return Ok(Vec::new());
+        }
+        result => result?,
     };
     let deadline = Instant::now() + QUERY_TIMEOUT;
     let mut rows = Vec::new();
@@ -171,6 +186,9 @@ fn query(
             unsafe { cursor.Next(remaining.as_millis().max(1) as i32, &mut row, &mut returned) };
         status.ok()?;
         if returned == 0 {
+            if status.0 == WBEM_S_TIMEDOUT.0 && rows.is_empty() {
+                return Err(HRESULT::from_win32(ERROR_TIMEOUT.0).into());
+            }
             break;
         }
         let Some(row) = row[0].take() else { break };
@@ -221,4 +239,16 @@ fn property(row: &IWbemClassObject, name: PCWSTR) -> Option<Property> {
     let mut value = Property::default();
     unsafe { row.Get(name, 0, &mut value.0, None, None) }.ok()?;
     Some(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::acpi_celsius;
+
+    #[test]
+    fn converts_acpi_temperature_and_rejects_invalid_values() {
+        assert!((acpi_celsius(3232).unwrap() - 50.05).abs() < 0.01);
+        assert_eq!(acpi_celsius(0), None);
+        assert_eq!(acpi_celsius(u32::MAX), None);
+    }
 }

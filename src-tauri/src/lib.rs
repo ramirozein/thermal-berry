@@ -26,9 +26,9 @@ pub mod uninstall;
 #[cfg(target_os = "linux")]
 pub mod update;
 #[cfg(target_os = "windows")]
-mod windows_temperatures;
-#[cfg(target_os = "windows")]
 mod windows_hardware;
+#[cfg(target_os = "windows")]
+mod windows_temperatures;
 
 #[cfg(target_os = "linux")]
 mod fan_control;
@@ -142,7 +142,9 @@ pub fn run() {
         Db::open_in_memory().expect("in-memory sqlite always opens")
     });
     let config = db.load_config();
-    let device = config.vendor_override.as_deref()
+    let device = config
+        .vendor_override
+        .as_deref()
         .and_then(|vendor| thermal::create_device(vendor).ok())
         .or_else(|| thermal::detect_device().ok());
     let state = Arc::new(AppState::new(device, config, db));

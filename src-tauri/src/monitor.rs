@@ -462,6 +462,10 @@ mod tests {
         fn supports_auto_curve(&self) -> bool {
             true
         }
+
+        fn supports_fan_control(&self) -> bool {
+            true
+        }
     }
 
     fn test_state(temps: Vec<Option<f32>>, config: Config) -> (Arc<AppState>, Arc<Mutex<Vec<u8>>>) {

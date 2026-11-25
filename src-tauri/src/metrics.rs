@@ -81,6 +81,8 @@ pub struct MetricsSnapshot {
     temperatures: Reading<Vec<Temperature>>,
     temperature_expires_ms: Option<u64>,
     #[cfg(target_os = "windows")]
+    gpu_fan_speeds: Vec<FanSpeed>,
+    #[cfg(target_os = "windows")]
     thermal_zones: Reading<Vec<Temperature>>,
     #[cfg(target_os = "windows")]
     fan_speeds: Reading<Vec<FanSpeed>>,
@@ -109,9 +111,19 @@ impl Default for MetricsSnapshot {
             },
             temperature_expires_ms: None,
             #[cfg(target_os = "windows")]
-            thermal_zones: Reading { value: None, status: ReadingStatus::Pending, timestamp_ms: None },
+            gpu_fan_speeds: Vec::new(),
             #[cfg(target_os = "windows")]
-            fan_speeds: Reading { value: None, status: ReadingStatus::Pending, timestamp_ms: None },
+            thermal_zones: Reading {
+                value: None,
+                status: ReadingStatus::Pending,
+                timestamp_ms: None,
+            },
+            #[cfg(target_os = "windows")]
+            fan_speeds: Reading {
+                value: None,
+                status: ReadingStatus::Pending,
+                timestamp_ms: None,
+            },
             #[cfg(target_os = "windows")]
             hardware_expires_ms: None,
             #[cfg(target_os = "windows")]
@@ -275,16 +287,25 @@ fn spawn_windows_temperatures(app: AppHandle) -> mpsc::Sender<WorkerSignal> {
     use crate::windows_temperatures;
 
     let (stop, stopped) = mpsc::channel();
-    std::thread::spawn(move || {
-        loop {
-            let preferences = get_preferences(app.state::<DesktopPreferences>());
-            let interval = Duration::from_secs(preferences.update_interval_secs);
-            let readings: Vec<_> = windows_temperatures::gpu_temperature().into_iter().collect();
-            let available = !readings.is_empty();
-            publish_temperatures(&app, readings, now_ms(), interval, available);
-            if should_stop(&stopped, interval) {
-                break;
-            }
+    std::thread::spawn(move || loop {
+        let preferences = get_preferences(app.state::<DesktopPreferences>());
+        let interval = Duration::from_secs(preferences.update_interval_secs);
+        let (temperature, fans) = windows_temperatures::gpu_readings();
+        let timestamp = now_ms();
+        publish(&app, |snapshot| {
+            snapshot.temperatures = temperature.map_or_else(
+                || Reading {
+                    value: None,
+                    status: ReadingStatus::Unavailable,
+                    timestamp_ms: Some(timestamp),
+                },
+                |reading| Reading::sampled(Some(vec![reading]), timestamp),
+            );
+            snapshot.gpu_fan_speeds = fans;
+            snapshot.temperature_expires_ms = Some(reading_expiry(timestamp, interval));
+        });
+        if should_stop(&stopped, interval) {
+            break;
         }
     });
     stop
@@ -323,16 +344,31 @@ fn spawn_windows_hardware(app: AppHandle) -> mpsc::Sender<WorkerSignal> {
 fn hardware_reading<T>(result: windows::core::Result<Vec<T>>, timestamp: u64) -> Reading<Vec<T>> {
     match result {
         Ok(values) if !values.is_empty() => Reading::sampled(Some(values), timestamp),
-        Ok(_) => Reading { value: None, status: ReadingStatus::Unavailable, timestamp_ms: Some(timestamp) },
+        Ok(_) => Reading {
+            value: None,
+            status: ReadingStatus::Unavailable,
+            timestamp_ms: Some(timestamp),
+        },
         Err(_) => Reading::sampled(None, timestamp),
     }
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn has_windows_fan_readings(metrics: &Metrics) -> bool {
+pub(crate) fn windows_reading_capabilities(metrics: &Metrics) -> (bool, bool) {
     let snapshot = metrics.0.lock().unwrap();
-    snapshot.hardware_expires_ms.is_some_and(|expires| now_ms() <= expires)
-        && matches!(snapshot.fan_speeds.status, ReadingStatus::Available)
+    let now = now_ms();
+    let gpu_fresh = snapshot
+        .temperature_expires_ms
+        .is_some_and(|expires| now <= expires);
+    let wmi_fresh = snapshot
+        .hardware_expires_ms
+        .is_some_and(|expires| now <= expires);
+    let temperatures = (gpu_fresh
+        && matches!(snapshot.temperatures.status, ReadingStatus::Available))
+        || (wmi_fresh && matches!(snapshot.thermal_zones.status, ReadingStatus::Available));
+    let fan_rpm = (gpu_fresh && !snapshot.gpu_fan_speeds.is_empty())
+        || (wmi_fresh && matches!(snapshot.fan_speeds.status, ReadingStatus::Available));
+    (temperatures, fan_rpm)
 }
 
 fn memory_reading(used_bytes: u64, total_bytes: u64) -> Option<Memory> {
@@ -370,7 +406,7 @@ pub fn publish_linux_temperatures(
     publish_temperatures(app, values, sample.timestamp_ms, interval, device_available);
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn publish_temperatures(
     app: &AppHandle,
     values: Vec<Temperature>,
@@ -384,8 +420,7 @@ fn publish_temperatures(
         if !device_available {
             snapshot.temperatures.status = ReadingStatus::Unavailable;
         }
-        snapshot.temperature_expires_ms =
-            Some(reading_expiry(timestamp_ms, interval));
+        snapshot.temperature_expires_ms = Some(reading_expiry(timestamp_ms, interval));
     });
 }
 

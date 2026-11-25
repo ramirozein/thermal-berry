@@ -19,6 +19,7 @@ export type MetricsSnapshot = {
     memory: Reading<Memory>;
     temperatures: Reading<Temperature[]>;
     temperatureExpiresMs: number | null;
+    gpuFanSpeeds?: FanSpeed[];
     thermalZones?: Reading<Temperature[]>;
     fanSpeeds?: Reading<FanSpeed[]>;
     hardwareExpiresMs?: number | null;
@@ -145,7 +146,9 @@ export function systemMetrics(snapshot: MetricsSnapshot | null, now: number) {
     const ramValue = fresh(memory) ? memory?.value : null;
     return {
         cpu: cpuValue == null ? cpu?.status === "pending" || !cpu ? "Waiting…" : "Not available" : formatPercent(cpuValue),
+        cpuPercent: cpuValue ?? null,
         ram: ramValue ? formatPercent(ramValue.percent) : memory ? "Not available" : "Waiting…",
+        ramPercent: ramValue?.percent ?? null,
         ramDetail: ramValue ? `${formatGiB(ramValue.usedBytes)} / ${formatGiB(ramValue.totalBytes)}` : undefined,
     };
 }
@@ -162,5 +165,6 @@ export function currentTemperatures(snapshot: MetricsSnapshot | null, now: numbe
 }
 
 export function currentFanSpeeds(snapshot: MetricsSnapshot | null, now: number) {
-    return currentValues(snapshot?.fanSpeeds, snapshot?.hardwareExpiresMs, now);
+    const gpuFans = now <= (snapshot?.temperatureExpiresMs ?? 0) ? snapshot?.gpuFanSpeeds ?? [] : [];
+    return [...gpuFans, ...currentValues(snapshot?.fanSpeeds, snapshot?.hardwareExpiresMs, now)];
 }
