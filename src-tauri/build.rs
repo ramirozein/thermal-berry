@@ -24,6 +24,8 @@ fn main() {
             "install_udev_rule",
             "get_autostart",
             "set_autostart",
+            "get_preferences",
+            "set_preferences",
             "check_for_update",
             "install_update",
             "uninstall_app",

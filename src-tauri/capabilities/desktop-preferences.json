@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop-preferences",
+  "description": "Windows and macOS preferences in the main window",
+  "windows": ["main"],
+  "platforms": ["windows", "macOS"],
+  "permissions": ["allow-get-preferences", "allow-set-preferences"]
+}

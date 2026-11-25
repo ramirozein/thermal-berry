@@ -12,7 +12,13 @@ pub(crate) fn apply_automatic(
     errors: &mut Vec<String>,
     elapsed_secs: f32,
 ) {
-    if inner.config.mode != FanMode::Auto || inner.control.suspended {
+    if inner.config.mode != FanMode::Auto
+        || inner.control.suspended
+        || !inner
+            .device
+            .as_ref()
+            .is_some_and(|device| device.supports_fan_control())
+    {
         return;
     }
     let missing_sensor = readings.is_empty() || readings.iter().any(Option::is_none);
@@ -91,7 +97,11 @@ pub(crate) fn return_to_firmware(state: &AppState) {
     let mut inner = state.lock();
     inner.shutting_down = true;
     inner.control.maintenance = true;
-    if let Some(device) = inner.device.as_ref() {
+    if let Some(device) = inner
+        .device
+        .as_ref()
+        .filter(|device| device.supports_fan_control())
+    {
         for fan in device.fans() {
             if let Err(error) = fan.set_boost(fan.boost_range().0) {
                 eprintln!(

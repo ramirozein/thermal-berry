@@ -6,17 +6,8 @@ use super::{Fan, Result, TempSensor, ThermalDevice, ThermalError};
 const HWMON_ROOT: &str = "/sys/class/hwmon";
 const HWMON_NAME: &str = "alienware_wmi";
 const DMI_PRODUCT: &str = "/sys/class/dmi/id/product_name";
-/// Upper bound on enumerated fans/sensors: no real board exposes anywhere
-/// near this many, so it just keeps a misbehaving driver from turning the
-/// index scan into an unbounded loop.
 const MAX_ENTRIES: u32 = 64;
 
-/// Implementation for Alienware via the kernel's `alienware-wmi-wmax` driver.
-///
-/// The hwmon number changes between reboots, so detection dynamically
-/// searches for the directory whose `name` is `alienware_wmi`. Fans and
-/// sensors are enumerated by index (`fanN_input`, `tempN_input`) instead of
-/// assuming there are always exactly two.
 pub struct AlienwareDevice {
     hwmon_path: PathBuf,
 }
@@ -91,6 +82,10 @@ impl ThermalDevice for AlienwareDevice {
     fn supports_auto_curve(&self) -> bool {
         true
     }
+
+    fn supports_fan_control(&self) -> bool {
+        true
+    }
 }
 
 struct AlienwareFan {
@@ -133,8 +128,6 @@ impl Fan for AlienwareFan {
     }
 
     fn is_writable(&self) -> bool {
-        // Opening for write doesn't modify the attribute; fails with EACCES if
-        // the udev rule hasn't been installed yet.
         fs::OpenOptions::new()
             .write(true)
             .open(self.attr("boost"))

@@ -1,5 +1,7 @@
 pub mod alienware;
 pub mod error;
+mod hwmon;
+mod thinkpad;
 
 pub use error::ThermalError;
 
@@ -28,22 +30,21 @@ pub trait ThermalDevice: Send + Sync {
     fn fans(&self) -> Vec<Box<dyn Fan>>;
     fn sensors(&self) -> Vec<Box<dyn TempSensor>>;
     fn supports_auto_curve(&self) -> bool;
+    fn supports_fan_control(&self) -> bool;
 }
 
-pub const VENDORS: &[&str] = &["alienware"];
+pub const VENDORS: &[&str] = &["alienware", thinkpad::VENDOR, "lenovo", "hp", "asus"];
 
 pub fn detect_device() -> Result<Box<dyn ThermalDevice>> {
-    for vendor in VENDORS {
-        if let Ok(device) = create_device(vendor) {
-            return Ok(device);
-        }
-    }
-    Err(ThermalError::DeviceNotFound)
+    create_device("alienware").or_else(|_| Ok(Box::new(hwmon::HwmonDevice::detect(None)?)))
 }
 
 pub fn create_device(vendor: &str) -> Result<Box<dyn ThermalDevice>> {
     match vendor {
         "alienware" => Ok(Box::new(alienware::AlienwareDevice::detect()?)),
+        candidate if hwmon::VENDORS.contains(&candidate) => {
+            Ok(Box::new(hwmon::HwmonDevice::detect(Some(candidate))?))
+        }
         other => Err(ThermalError::UnknownVendor(other.to_string())),
     }
 }

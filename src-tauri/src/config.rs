@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::curve::CurvePoint;
+pub use crate::preferences::{TempUnit, Theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -40,21 +41,6 @@ impl AutomaticControl {
     pub fn is_valid(&self) -> bool {
         self.target_temp_c.is_finite() && (50.0..=85.0).contains(&self.target_temp_c)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TempUnit {
-    Celsius,
-    Fahrenheit,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Theme {
-    System,
-    Light,
-    Dark,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

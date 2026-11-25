@@ -20,7 +20,11 @@ sign=(gpg --batch --local-user "$actual" --digest-algo SHA256)
 
 mkdir -p signed "pages/apt/pool/main/t/thermal-berry/${version#v}" pages/apt/dists/stable/main/binary-amd64
 cp packages/thermal-berry-linux/*.AppImage packages/thermal-berry-linux/*.rpm \
-   packages/thermal-berry-windows/*-setup.exe packages/thermal-berry-macos/*.dmg install.sh signed/
+   packages/thermal-berry-windows/*-setup.exe packages/thermal-berry-macos/*.dmg signed/
+grep -Fxq 'readonly EMBEDDED_RELEASE_KEYRING=""' install.sh
+embedded_keyring=$(base64 --wrap=0 release-keyring.gpg)
+sed "s|^readonly EMBEDDED_RELEASE_KEYRING=\"\"$|readonly EMBEDDED_RELEASE_KEYRING=\"$embedded_keyring\"|" \
+    install.sh > signed/install.sh
 debs=(packages/thermal-berry-linux/*.deb)
 [[ ${#debs[@]} == 1 ]]
 [[ $(dpkg-deb -f "${debs[0]}" Package) == thermal-berry ]]
@@ -39,6 +43,7 @@ cp "${debs[0]}" "pages/apt/pool/main/t/thermal-berry/${version#v}/"
     sha512sum -c SHA512SUMS
 )
 
+cp signed/install.sh pages/install.sh
 cp release-keyring.gpg pages/apt/thermal-berry.gpg
 (
     cd pages/apt

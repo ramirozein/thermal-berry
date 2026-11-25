@@ -59,6 +59,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     #[cfg(target_os = "linux")]
     let (boost_all, mode_auto, mode_disabled) = {
         let state = app.state::<Arc<AppState>>();
+        let enabled = commands::state_supports_fan_control(&state);
         let (mode, boost_enabled) = {
             let inner = state.lock();
             (inner.config.mode, inner.config.all_fans_boost.enabled)
@@ -67,7 +68,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             app,
             MENU_BOOST_ALL,
             "Boost all fans",
-            true,
+            enabled,
             boost_enabled,
             None::<&str>,
         )?;
@@ -75,7 +76,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             app,
             MENU_MODE_AUTO,
             "Auto mode",
-            true,
+            enabled,
             mode == FanMode::Auto,
             None::<&str>,
         )?;
@@ -83,7 +84,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             app,
             MENU_MODE_DISABLED,
             "Disable fan control",
-            true,
+            enabled,
             mode == FanMode::Disabled,
             None::<&str>,
         )?;
@@ -158,6 +159,15 @@ fn apply_control(app: &AppHandle, id: &str) {
         eprintln!("thermal-berry: tray control failed: {error}");
     }
     commands::publish_state(app, &state);
+}
+
+#[cfg(target_os = "linux")]
+pub fn set_fan_controls_enabled(app: &AppHandle, enabled: bool) {
+    if let Some(handles) = app.try_state::<TrayHandles<tauri::Wry>>() {
+        let _ = handles.mode_auto.set_enabled(enabled);
+        let _ = handles.mode_disabled.set_enabled(enabled);
+        let _ = handles.boost_all.set_enabled(enabled);
+    }
 }
 
 #[cfg(target_os = "linux")]

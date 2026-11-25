@@ -73,10 +73,11 @@ pub(crate) fn read_hardware(device: Option<&dyn ThermalDevice>) -> HardwareReadi
         errors.push("No compatible thermal device detected".into());
         (Vec::new(), Vec::new())
     };
-    if readings.is_empty() {
+    let fan_control = device.is_some_and(|device| device.supports_fan_control());
+    if fan_control && readings.is_empty() {
         errors.push("No temperature sensors reporting".into());
     }
-    if fans.is_empty() {
+    if fan_control && fans.is_empty() {
         errors.push("No fans detected".into());
     }
     let fan_readings: Vec<FanReading> = fans
@@ -89,12 +90,16 @@ pub(crate) fn read_hardware(device: Option<&dyn ThermalDevice>) -> HardwareReadi
                     None
                 }
             };
-            let boost_percent = match fan.read_boost() {
-                Ok(value) => Some(curve::boost_to_percent(value, fan.boost_range())),
-                Err(e) => {
-                    errors.push(format!("{} boost: {e}", fan.id()));
-                    None
+            let boost_percent = if fan_control {
+                match fan.read_boost() {
+                    Ok(value) => Some(curve::boost_to_percent(value, fan.boost_range())),
+                    Err(e) => {
+                        errors.push(format!("{} boost: {e}", fan.id()));
+                        None
+                    }
                 }
+            } else {
+                None
             };
             FanReading {
                 id: fan.id().into(),
@@ -120,6 +125,8 @@ pub(crate) fn read_hardware(device: Option<&dyn ThermalDevice>) -> HardwareReadi
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
+    host_name: Option<String>,
+    platform: &'static str,
     cpu_usage: bool,
     memory: bool,
     temperatures: bool,
@@ -133,12 +140,18 @@ pub struct Capabilities {
 
 #[cfg(not(target_os = "linux"))]
 #[tauri::command]
-pub fn get_capabilities() -> Capabilities {
+pub fn get_capabilities(_metrics: tauri::State<'_, crate::metrics::Metrics>) -> Capabilities {
+    #[cfg(target_os = "windows")]
+    let (temperatures, fan_rpm) = crate::metrics::windows_reading_capabilities(&_metrics);
+    #[cfg(not(target_os = "windows"))]
+    let (temperatures, fan_rpm) = (false, false);
     Capabilities {
+        host_name: sysinfo::System::host_name().ok(),
+        platform: std::env::consts::OS,
         cpu_usage: true,
         memory: true,
-        temperatures: false,
-        fan_rpm: false,
+        temperatures,
+        fan_rpm,
         fan_control: false,
         write_access: false,
         linux_maintenance: false,
@@ -157,11 +170,13 @@ pub async fn get_capabilities(
         Err(error) => return Err(error),
     };
     Ok(Capabilities {
+        host_name: sysinfo::System::host_name().ok(),
+        platform: std::env::consts::OS,
         cpu_usage: true,
         memory: true,
         temperatures: device.as_ref().is_some_and(|d| !d.sensors.is_empty()),
         fan_rpm: device.as_ref().is_some_and(|d| !d.fans.is_empty()),
-        fan_control: device.as_ref().is_some_and(|d| !d.fans.is_empty()),
+        fan_control: device.as_ref().is_some_and(|d| d.fan_control),
         write_access: device.as_ref().is_some_and(|d| d.write_access),
         linux_maintenance: true,
         device,

@@ -1,4 +1,5 @@
 import type {ComponentPropsWithRef, KeyboardEventHandler, ReactNode} from "react";
+import {ChevronDown} from "lucide-react";
 import {cn} from "../lib/utils";
 
 type ButtonVariant = "primary" | "outline" | "ghost" | "destructive";
@@ -141,17 +142,20 @@ export function Select<T extends string>({value, options, onChange, label,}: {
     label?: string;
 }) {
     return (
-        <select
-            aria-label={label}
-            value={value}
-            onChange={(e) => onChange(e.target.value as T)}
-            className="rounded-lg bg-secondary px-3 py-2 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-        >
-            {options.map((o) => (
-                <option key={o.value} value={o.value}>
-                    {o.label}
-                </option>
-            ))}
-        </select>
+        <div className="relative">
+            <select
+                aria-label={label}
+                value={value}
+                onChange={(e) => onChange(e.target.value as T)}
+                className="appearance-none rounded-lg bg-secondary py-2 pl-3 pr-8 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            >
+                {options.map((o) => (
+                    <option key={o.value} value={o.value}>
+                        {o.label}
+                    </option>
+                ))}
+            </select>
+            <ChevronDown aria-hidden="true" className="pointer-events-none absolute right-2.5 top-1/2 size-3.5 -translate-y-1/2"/>
+        </div>
     );
 }

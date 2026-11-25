@@ -8,11 +8,14 @@ pub mod config;
 pub mod curve;
 #[cfg(target_os = "linux")]
 pub mod db;
+#[cfg(not(target_os = "linux"))]
+mod desktop_uninstall;
 mod lifecycle;
 mod metrics;
 #[cfg(target_os = "linux")]
 pub mod monitor;
 mod osd;
+mod preferences;
 #[cfg(target_os = "linux")]
 pub mod state;
 #[cfg(target_os = "linux")]
@@ -22,6 +25,10 @@ pub mod tray;
 pub mod uninstall;
 #[cfg(target_os = "linux")]
 pub mod update;
+#[cfg(target_os = "windows")]
+mod windows_hardware;
+#[cfg(target_os = "windows")]
+mod windows_temperatures;
 
 #[cfg(target_os = "linux")]
 mod fan_control;
@@ -44,6 +51,10 @@ fn builder() -> tauri::Builder<tauri::Wry> {
         tray::show_main_window(app)
     }));
     builder
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(metrics::Metrics::default())
         .manage(lifecycle::Lifecycle::default())
         .on_window_event(|window, event| {
@@ -101,6 +112,7 @@ fn on_run(app: &tauri::AppHandle, event: RunEvent) {
 pub fn run() {
     builder()
         .setup(|app| {
+            preferences::desktop::setup(app.handle());
             setup_desktop(app);
             Ok(())
         })
@@ -112,6 +124,11 @@ pub fn run() {
             osd::resize_osd,
             osd::drag_osd,
             lifecycle::quit_app,
+            preferences::desktop::get_preferences,
+            preferences::desktop::set_preferences,
+            preferences::get_autostart,
+            preferences::set_autostart,
+            desktop_uninstall::uninstall_app,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
@@ -125,17 +142,14 @@ pub fn run() {
         Db::open_in_memory().expect("in-memory sqlite always opens")
     });
     let config = db.load_config();
-    let device = match config.vendor_override.as_deref() {
-        Some(vendor) => thermal::create_device(vendor).ok(),
-        None => thermal::detect_device().ok(),
-    };
+    let device = config
+        .vendor_override
+        .as_deref()
+        .and_then(|vendor| thermal::create_device(vendor).ok())
+        .or_else(|| thermal::detect_device().ok());
     let state = Arc::new(AppState::new(device, config, db));
 
     let app = builder()
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
-        ))
         .manage(state.clone())
         .setup(move |app| {
             commands::restore_control(&state);
@@ -164,8 +178,8 @@ pub fn run() {
             commands::select_vendor,
             commands::check_write_access,
             commands::install_udev_rule,
-            commands::get_autostart,
-            commands::set_autostart,
+            preferences::get_autostart,
+            preferences::set_autostart,
             update::check_for_update,
             update::install_update,
             uninstall::uninstall_app,
@@ -205,6 +219,26 @@ mod ipc_tests {
         true
     }
 
+    #[tauri::command]
+    fn get_preferences() -> bool {
+        true
+    }
+
+    #[tauri::command]
+    fn set_preferences() -> bool {
+        true
+    }
+
+    #[tauri::command]
+    fn set_autostart() -> bool {
+        true
+    }
+
+    #[tauri::command]
+    fn uninstall_app() -> bool {
+        true
+    }
+
     #[test]
     fn the_osd_can_read_metrics_but_cannot_mutate_application_state() {
         let app = mock_builder()
@@ -214,7 +248,11 @@ mod ipc_tests {
                 set_osd_settings,
                 quit_app,
                 set_fan_boost,
-                resize_osd
+                resize_osd,
+                get_preferences,
+                set_preferences,
+                set_autostart,
+                uninstall_app
             ])
             .build(tauri::generate_context!())
             .unwrap();
@@ -245,7 +283,15 @@ mod ipc_tests {
         assert!(get_ipc_response(&main, request("resize_osd")).is_err());
         assert!(get_ipc_response(&main, request("set_osd_settings")).is_ok());
         assert!(get_ipc_response(&main, request("quit_app")).is_ok());
-        for command in ["set_osd_settings", "quit_app", "set_fan_boost"] {
+        for command in [
+            "set_osd_settings",
+            "quit_app",
+            "set_fan_boost",
+            "get_preferences",
+            "set_preferences",
+            "set_autostart",
+            "uninstall_app",
+        ] {
             assert!(
                 get_ipc_response(&osd, request(command)).is_err(),
                 "{command}"
@@ -255,5 +301,14 @@ mod ipc_tests {
             get_ipc_response(&main, request("set_fan_boost")).is_ok(),
             cfg!(target_os = "linux")
         );
+        assert!(get_ipc_response(&main, request("set_autostart")).is_ok());
+        assert!(get_ipc_response(&main, request("uninstall_app")).is_ok());
+        for command in ["get_preferences", "set_preferences"] {
+            assert_eq!(
+                get_ipc_response(&main, request(command)).is_ok(),
+                cfg!(any(target_os = "windows", target_os = "macos")),
+                "{command}"
+            );
+        }
     }
 }

@@ -33,6 +33,7 @@ pub struct DeviceInfo {
     pub fans: Vec<FanInfo>,
     pub sensors: Vec<String>,
     pub supports_auto_curve: bool,
+    pub fan_control: bool,
     pub write_access: bool,
     pub available_vendors: Vec<String>,
 }
@@ -63,11 +64,13 @@ fn device_info(device: &dyn thermal::ThermalDevice) -> DeviceInfo {
             writable: f.is_writable(),
         })
         .collect();
+    let fan_control = device.supports_fan_control() && !fans.is_empty();
     DeviceInfo {
         vendor: device.vendor_name().to_string(),
         driver: device.driver_name().to_string(),
         model: device.model(),
-        write_access: !fans.is_empty() && fans.iter().all(|f| f.writable),
+        fan_control,
+        write_access: fan_control && fans.iter().all(|fan| fan.writable),
         fans,
         sensors: device
             .sensors()
@@ -110,6 +113,25 @@ pub fn get_config(state: State<'_, Arc<AppState>>) -> Config {
     state.lock().config.clone()
 }
 
+pub(crate) fn state_supports_fan_control(state: &AppState) -> bool {
+    state
+        .lock()
+        .device
+        .as_ref()
+        .is_some_and(|device| device.supports_fan_control())
+}
+
+fn control_device(inner: &Inner) -> CmdResult<&dyn thermal::ThermalDevice> {
+    let device = inner
+        .device
+        .as_deref()
+        .ok_or(ThermalError::DeviceNotFound)?;
+    if !device.supports_fan_control() {
+        return Err(ThermalError::Unsupported);
+    }
+    Ok(device)
+}
+
 pub const STATE_EVENT: &str = "state-changed";
 
 #[tauri::command]
@@ -124,6 +146,8 @@ pub fn publish_state(app: &AppHandle, state: &Arc<AppState>) {
     let event_app = app.clone();
     if let Err(e) = app.run_on_main_thread(move || {
         let snapshot = state.lock().snapshot();
+        let fan_control = state_supports_fan_control(&state);
+        tray::set_fan_controls_enabled(&event_app, fan_control);
         tray::sync_mode(&event_app, snapshot.config.mode);
         tray::sync_all_fans_boost(&event_app, snapshot.config.all_fans_boost.enabled);
         if let Err(e) = event_app.emit_to("main", STATE_EVENT, snapshot) {
@@ -205,6 +229,24 @@ fn validate_config(config: &Config) -> CmdResult<()> {
 pub fn apply_config_patch(state: &AppState, patch: ConfigPatch) -> CmdResult<()> {
     let mut inner = state.lock();
     ensure_running(&inner)?;
+    if patch.automatic_control.is_some()
+        || patch.curves.is_some()
+        || patch.all_fans_boost_percent.is_some()
+    {
+        let device = control_device(&inner)?;
+        if let Some(curves) = &patch.curves {
+            let fans = device.fans();
+            if !device.supports_auto_curve()
+                || curves
+                    .keys()
+                    .any(|id| !fans.iter().any(|fan| fan.id() == id))
+            {
+                return Err(ThermalError::InvalidValue(
+                    "curve requires a supported fan".into(),
+                ));
+            }
+        }
+    }
     let mut next = inner.config.clone();
     if let Some(v) = patch.update_interval_secs {
         next.update_interval_secs = v.clamp(1, 60);
@@ -268,8 +310,7 @@ fn transition(inner: &mut Inner, mut next: Config, writes: Vec<(String, u8)>) ->
         next.manual_boosts.extend(writes.iter().cloned());
     }
     validate_config(&next)?;
-    let device = inner.device.as_ref().ok_or(ThermalError::DeviceNotFound)?;
-    let fans = device.fans();
+    let fans = control_device(inner)?.fans();
     if fans.is_empty() {
         return Err(ThermalError::DeviceNotFound);
     }
@@ -279,6 +320,9 @@ fn transition(inner: &mut Inner, mut next: Config, writes: Vec<(String, u8)>) ->
             .iter()
             .find(|f| f.id() == id)
             .ok_or_else(|| ThermalError::InvalidValue(format!("unknown fan: {id}")))?;
+        if !fan.is_writable() {
+            return Err(ThermalError::PermissionDenied { path: id.clone() });
+        }
         previous.push(fan.read_boost()?);
     }
     let mut attempted = 0;
@@ -355,11 +399,7 @@ pub fn apply_fan_boost(
         ));
     }
     let mut next = inner.config.clone();
-    let fans = inner
-        .device
-        .as_ref()
-        .ok_or(ThermalError::DeviceNotFound)?
-        .fans();
+    let fans = control_device(&inner)?.fans();
     if !fans.iter().any(|f| f.id() == fan_id) {
         return Err(ThermalError::InvalidValue(format!("unknown fan: {fan_id}")));
     }
@@ -397,11 +437,7 @@ pub fn apply_all_fans_boost(state: &AppState, enabled: bool, percent: u8) -> Cmd
     next.control_epoch += 1;
     let writes = if enabled {
         next.mode = FanMode::Manual;
-        let fans = inner
-            .device
-            .as_ref()
-            .ok_or(ThermalError::DeviceNotFound)?
-            .fans();
+        let fans = control_device(&inner)?.fans();
         for fan in &fans {
             next.manual_boosts.insert(fan.id().to_string(), percent);
         }
@@ -426,11 +462,7 @@ pub fn set_all_fans_boost(
 }
 
 fn mode_writes(inner: &Inner, config: &Config) -> CmdResult<Vec<(String, u8)>> {
-    let fans = inner
-        .device
-        .as_ref()
-        .ok_or(ThermalError::DeviceNotFound)?
-        .fans();
+    let fans = control_device(inner)?.fans();
     Ok(match config.mode {
         FanMode::Auto => Vec::new(),
         FanMode::Manual => fans
@@ -465,6 +497,17 @@ pub fn restore_control(state: &AppState) {
 }
 
 fn restore_saved_mode(inner: &mut Inner) {
+    if inner
+        .device
+        .as_ref()
+        .is_some_and(|device| !device.supports_fan_control())
+    {
+        inner.control.applied_mode = None;
+        inner.control.applied_boosts.clear();
+        inner.control.error = None;
+        inner.control.suspended = false;
+        return;
+    }
     let config = inner.config.clone();
     let result = mode_writes(inner, &config).and_then(|writes| transition(inner, config, writes));
     if let Err(e) = result {
@@ -481,12 +524,19 @@ fn restore_saved_mode(inner: &mut Inner) {
 /// authorization. Cancellation leaves an explicit Disabled mode to retry from.
 pub(crate) fn begin_maintenance(state: &AppState) -> CmdResult<()> {
     let mut inner = state.lock();
-    let mut next = inner.config.clone();
-    next.mode = FanMode::Disabled;
-    next.all_fans_boost.enabled = false;
-    next.control_epoch += 1;
-    let writes = mode_writes(&inner, &next)?;
-    transition(&mut inner, next, writes)?;
+    ensure_running(&inner)?;
+    if inner
+        .device
+        .as_ref()
+        .is_some_and(|device| device.supports_fan_control())
+    {
+        let mut next = inner.config.clone();
+        next.mode = FanMode::Disabled;
+        next.all_fans_boost.enabled = false;
+        next.control_epoch += 1;
+        let writes = mode_writes(&inner, &next)?;
+        transition(&mut inner, next, writes)?;
+    }
     inner.control.maintenance = true;
     Ok(())
 }
@@ -531,6 +581,11 @@ pub fn select_vendor(
         next.vendor_override = Some(vendor);
         next.revision += 1;
         next.control_epoch += 1;
+        if inner.device.as_ref().is_some_and(|previous| {
+            previous.supports_fan_control() && previous.vendor_name() != device.vendor_name()
+        }) {
+            return Err(ThermalError::Unsupported);
+        }
         save_config(&inner, &next)?;
         inner.config = next;
         inner.device = Some(device.clone());
@@ -544,11 +599,11 @@ pub fn select_vendor(
 pub fn check_write_access(state: State<'_, Arc<AppState>>) -> bool {
     let inner = state.lock();
     match inner.device.as_ref() {
-        Some(device) => {
+        Some(device) if device.supports_fan_control() => {
             let fans = device.fans();
             !fans.is_empty() && fans.iter().all(|f| f.is_writable())
         }
-        None => false,
+        _ => false,
     }
 }
 
@@ -558,8 +613,16 @@ pub fn check_write_access(state: State<'_, Arc<AppState>>) -> bool {
 /// Async + spawn_blocking: pkexec blocks until the user answers the password
 /// dialog, which must not freeze the main thread (UI) nor pin an async worker.
 #[tauri::command]
-pub async fn install_udev_rule(app: AppHandle) -> CmdResult<()> {
-    let _maintenance = crate::lifecycle::Maintenance::start(&app)?;
+pub async fn install_udev_rule(app: AppHandle, state: State<'_, Arc<AppState>>) -> CmdResult<()> {
+    if !state
+        .lock()
+        .device
+        .as_ref()
+        .is_some_and(|device| device.driver_name() == "alienware_wmi")
+    {
+        return Err(ThermalError::Unsupported);
+    }
+    let _maintenance = crate::lifecycle::Maintenance::start(&app).map_err(ThermalError::Control)?;
     tauri::async_runtime::spawn_blocking(install_udev_rule_blocking)
         .await
         .map_err(|e| ThermalError::InvalidValue(format!("install task failed: {e}")))?
@@ -571,39 +634,27 @@ fn install_udev_rule_blocking() -> CmdResult<()> {
 
 pub(crate) fn change_udev_access(action: &str) -> CmdResult<()> {
     let output = Command::new("/usr/bin/pkexec")
-        .args(["/bin/bash", "-c", include_str!("../../scripts/udev-access.sh"), "thermal-berry-udev", action])
+        .args([
+            "/bin/bash",
+            "-c",
+            include_str!("../../scripts/udev-access.sh"),
+            "thermal-berry-udev",
+            action,
+        ])
         .output()
         .map_err(|error| ThermalError::from_io(std::path::Path::new("/usr/bin/pkexec"), error))?;
     if output.status.success() {
         Ok(())
     } else if matches!(output.status.code(), Some(126 | 127)) {
-        Err(ThermalError::PermissionDenied { path: UDEV_RULE_PATH.into() })
+        Err(ThermalError::PermissionDenied {
+            path: UDEV_RULE_PATH.into(),
+        })
     } else {
         Err(ThermalError::Control(format!(
             "udev maintenance failed: {}",
             String::from_utf8_lossy(&output.stderr).trim(),
         )))
     }
-}
-
-#[tauri::command]
-pub fn get_autostart(app: AppHandle) -> CmdResult<bool> {
-    use tauri_plugin_autostart::ManagerExt;
-    app.autolaunch()
-        .is_enabled()
-        .map_err(|e| ThermalError::InvalidValue(format!("autostart: {e}")))
-}
-
-#[tauri::command]
-pub fn set_autostart(app: AppHandle, enabled: bool) -> CmdResult<()> {
-    use tauri_plugin_autostart::ManagerExt;
-    let manager = app.autolaunch();
-    let result = if enabled {
-        manager.enable()
-    } else {
-        manager.disable()
-    };
-    result.map_err(|e| ThermalError::InvalidValue(format!("autostart: {e}")))
 }
 
 #[cfg(test)]
@@ -694,6 +745,10 @@ mod tests {
             vec![Box::new(TestSensor)]
         }
         fn supports_auto_curve(&self) -> bool {
+            true
+        }
+
+        fn supports_fan_control(&self) -> bool {
             true
         }
     }

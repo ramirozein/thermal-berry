@@ -20,8 +20,7 @@ Contributions are welcome!
 curl -fsSL https://ramirozein.me/thermal-berry/install.sh | bash
 ```
 
-Downloads the latest release from [GitHub Releases](https://github.com/ramirozein/thermal-berry/releases),
-installing the `.deb` package on apt/dpkg systems or a portable AppImage otherwise.
+Downloads the latest release from [GitHub Releases](https://github.com/ramirozein/thermal-berry/releases).
 
 ## Development
 

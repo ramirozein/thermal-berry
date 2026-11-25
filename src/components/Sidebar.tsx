@@ -12,13 +12,13 @@ import {
 import {useState} from "react";
 import {installUpdate, isThermalError} from "../lib/ipc";
 import {cn} from "../lib/utils";
-import {useConfig, useControlActions, useDevice, useUpdateInfo} from "../lib/app-context";
+import {useConfig, useControlActions, useDevice, useGeneralConfig, useUpdateInfo} from "../lib/app-context";
 import type {Screen} from "../App";
 
 const navItems = [
     {id: "dashboard" as const, label: "Overview", icon: Activity},
-    {id: "manual" as const, label: "Manual Control", icon: SlidersHorizontal},
-    {id: "curve" as const, label: "Automatic Control", icon: CircleGauge},
+    {id: "manual" as const, label: "Manual Control", icon: SlidersHorizontal, requiresFanControl: true},
+    {id: "curve" as const, label: "Automatic Control", icon: CircleGauge, requiresFanControl: true},
     {id: "osd" as const, label: "On-Screen Display", icon: Download},
     {id: "settings" as const, label: "Settings", icon: Settings},
 ];
@@ -39,6 +39,7 @@ export function Sidebar({screen, onNavigate,}: {
 }) {
     const {capabilities, device} = useDevice();
     const config = useConfig();
+    const generalConfig = useGeneralConfig();
     const {updateConfig} = useControlActions();
     const updateInfo = useUpdateInfo();
     const [updating, setUpdating] = useState(false);
@@ -54,10 +55,8 @@ export function Sidebar({screen, onNavigate,}: {
             setUpdating(false);
         }
     };
-    const isDark =
-        config?.theme === "dark" ||
-        (config?.theme === "system" &&
-            window.matchMedia("(prefers-color-scheme: dark)").matches);
+    const hostName = capabilities?.hostName;
+    const deviceName = device?.model ?? hostName ?? "Computer name unavailable";
 
     return (
         <aside
@@ -70,11 +69,7 @@ export function Sidebar({screen, onNavigate,}: {
                 </div>
             </div>
             <nav className="mt-10 flex flex-1 flex-col gap-1" aria-label="Main navigation">
-                {navItems.filter(({id}) => id === "dashboard" || id === "osd" || (id === "settings" ? capabilities?.linuxMaintenance : capabilities?.fanControl)).map(({
-                                                                                                                         id,
-                                                                                                                         label,
-                                                                                                                         icon: Icon
-                                                                                                                     }) => (
+                {navItems.filter((item) => !item.requiresFanControl || capabilities?.fanControl).map(({id, label, icon: Icon}) => (
                     <button
                         key={id}
                         type="button"
@@ -94,11 +89,6 @@ export function Sidebar({screen, onNavigate,}: {
                 ))}
             </nav>
             <div className="border-t border-sidebar-border pt-4">
-                {updateInfo?.managedByApt && (
-                    <p className="mb-2 hidden text-xs text-muted-foreground md:block">
-                        Updates are managed by APT.
-                    </p>
-                )}
                 {updateInfo?.available && (
                     <button
                         type="button"
@@ -121,37 +111,33 @@ export function Sidebar({screen, onNavigate,}: {
                         {updateError}
                     </p>
                 )}
-                {capabilities?.linuxMaintenance && <button
+                {generalConfig && <button
                     type="button"
-                    aria-label={isDark ? "Light theme" : "Dark theme"}
-                    onClick={() => void updateConfig({theme: isDark ? "light" : "dark"}).catch(() => {
+                    aria-label="Toggle light or dark theme"
+                    onClick={() => void updateConfig({
+                        theme: document.documentElement.classList.contains("dark") ? "light" : "dark",
+                    }).catch(() => {
                     })}
                     className="flex h-10 w-full items-center gap-3 rounded-lg px-3 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
                 >
-                    {isDark ? <Sun className="size-4"/> : <Moon className="size-4"/>}
-                    <span className="hidden md:inline">
-            {isDark ? "Light theme" : "Dark theme"}
-          </span>
+                    <Sun className="hidden size-4 shrink-0 dark:block"/>
+                    <Moon className="size-4 shrink-0 dark:hidden"/>
+                    <span className="hidden md:dark:inline">Light theme</span>
+                    <span className="hidden md:inline dark:hidden">Dark theme</span>
                 </button>}
-                {capabilities?.linuxMaintenance && <div className="mt-2 hidden items-center gap-3 px-3 py-2 md:flex">
+                <div className="mt-2 flex items-center gap-3 px-1 py-2 md:px-3" title={deviceName}>
                     <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-secondary">
                         <Laptop className="size-3.5"/>
                     </div>
-                    <div className="min-w-0">
+                    <div className="hidden min-w-0 md:block">
                         <p className="truncate text-[11px] font-medium">
-                            {device?.model ?? "No device"}
+                            {deviceName}
                         </p>
-                        <p className="text-[10px] text-muted-foreground">
-                            {device
-                                ? config?.mode === "manual"
-                                    ? "Manual"
-                                    : config?.mode === "disabled"
-                                        ? "Disabled"
-                                        : "Automatic"
-                                : "Not detected"}
-                        </p>
+                        {device && config && <p className="text-[10px] text-muted-foreground">
+                            {config.mode === "manual" ? "Manual" : config.mode === "disabled" ? "Disabled" : "Automatic"}
+                        </p>}
                     </div>
-                </div>}
+                </div>
             </div>
         </aside>
     );

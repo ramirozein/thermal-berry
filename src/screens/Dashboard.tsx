@@ -139,9 +139,13 @@ const DashboardCharts = memo(function DashboardCharts({spanSecs, unit}: {spanSec
 });
 
 export function Dashboard() {
-    const {latest, isStale, healthy, control} = useTelemetry();
+    const {latest, isStale, healthy: controlHealthy, control} = useTelemetry();
     const config = useConfig();
     const {device} = useDevice();
+    const readOnly = device?.fanControl === false;
+    const healthy = readOnly
+        ? !!latest && !isStale && latest.errors.length === 0 && (latest.temps.length > 0 || latest.fans.some(({rpm}) => rpm !== null))
+        : controlHealthy;
     const unit = config?.tempUnit ?? "celsius";
     const configuredInterval = config?.updateIntervalSecs ?? 2;
     const intervalSecs = config?.mode === "auto" ? Math.min(configuredInterval, 2) : configuredInterval;
@@ -151,7 +155,7 @@ export function Dashboard() {
         : config?.mode === "disabled" ? "Fan control disabled" : config?.automaticControl.strategy === "curve" ? "Automatic curves" : "Target temperature control";
 
     const statusItems = [
-        `${modeLabel} · ${control?.appliedMode === config?.mode && healthy ? "confirmed" : "unconfirmed"}`,
+        readOnly ? "Read-only monitoring" : `${modeLabel} · ${control?.appliedMode === config?.mode && healthy ? "confirmed" : "unconfirmed"}`,
         device ? `${device.fans.length} fans` : "No fans",
         device ? `${isStale ? 0 : latest?.temps.length ?? 0}/${device.sensors.length} sensors reporting` : "No sensors"
     ];
@@ -168,7 +172,9 @@ export function Dashboard() {
                         <h2 className="text-sm font-semibold">System status</h2>
                         <p className="mt-1 text-xs text-muted-foreground">
                             {device
-                                ? healthy ? "Readings current; fan control confirmed" : control?.suspended ? "Fan control suspended; select a mode to retry" : "Control or telemetry needs attention"
+                                ? readOnly
+                                    ? healthy ? "Readings current" : "Thermal readings unavailable or incomplete"
+                                    : healthy ? "Readings current; fan control confirmed" : control?.suspended ? "Fan control suspended; select a mode to retry" : "Control or telemetry needs attention"
                                 : "No compatible device detected"}
                         </p>
                     </div>

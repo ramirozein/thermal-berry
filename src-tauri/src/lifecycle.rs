@@ -43,21 +43,17 @@ pub async fn quit_app(app: AppHandle) {
     quit(&app);
 }
 
-#[cfg(target_os = "linux")]
 pub struct Maintenance {
     app: AppHandle,
     finished: bool,
 }
 
-#[cfg(target_os = "linux")]
 impl Maintenance {
-    pub fn start(app: &AppHandle) -> Result<Self, crate::thermal::ThermalError> {
+    pub fn start(app: &AppHandle) -> Result<Self, String> {
         let lifecycle = app.state::<Lifecycle>();
         let mut state = lifecycle.0.lock().unwrap();
         if state.busy || state.quit_requested {
-            return Err(crate::thermal::ThermalError::Control(
-                "maintenance or shutdown is already in progress".into(),
-            ));
+            return Err("maintenance or shutdown is already in progress".into());
         }
         state.busy = true;
         Ok(Self {
@@ -88,7 +84,6 @@ impl Maintenance {
     }
 }
 
-#[cfg(target_os = "linux")]
 impl Drop for Maintenance {
     fn drop(&mut self) {
         if !self.finished {
