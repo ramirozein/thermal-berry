@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  DO_NOT_TRACK: '1'
+
 concurrency:
   group: thermal-berry-release-${{ github.ref }}
   cancel-in-progress: false
@@ -115,13 +118,19 @@ jobs:
         run: |
           bun run build
           cargo test --locked --manifest-path src-tauri/Cargo.toml
-          bun tests/signed-release.ts
+          bash tests/signed-release.sh
 
       - name: Build Linux packages
         if: matrix.platform == 'linux'
         env:
           THERMAL_BERRY_RELEASE_PUBLIC_KEY: ${{ vars.THERMAL_BERRY_RELEASE_PUBLIC_KEY }}
-        run: bun run tauri build -- --locked
+          THERMAL_BERRY_RELEASE_FINGERPRINT: ${{ vars.THERMAL_BERRY_RELEASE_FINGERPRINT }}
+        run: |
+          if [[ -n "$THERMAL_BERRY_RELEASE_PUBLIC_KEY" ]]; then
+            THERMAL_BERRY_RELEASE_PUBLIC_KEY=$(bash scripts/sign-release.sh --public-key)
+            export THERMAL_BERRY_RELEASE_PUBLIC_KEY
+          fi
+          bun run tauri build -- --locked
 
       - name: Collect Linux packages
         if: matrix.platform == 'linux'
@@ -174,14 +183,13 @@ jobs:
           path: packages
       - name: Install APT index tooling
         run: sudo apt-get update && sudo apt-get install -y apt-utils
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       - name: Sign artifacts and APT metadata
         env:
           VERSION: ${{ needs.check-version.outputs.version }}
           THERMAL_BERRY_RELEASE_PUBLIC_KEY: ${{ vars.THERMAL_BERRY_RELEASE_PUBLIC_KEY }}
           THERMAL_BERRY_RELEASE_FINGERPRINT: ${{ vars.THERMAL_BERRY_RELEASE_FINGERPRINT }}
           THERMAL_BERRY_RELEASE_SIGNING_KEY: ${{ secrets.THERMAL_BERRY_RELEASE_SIGNING_KEY }}
-        run: bun scripts/sign-release.ts "v$VERSION"
+        run: bash scripts/sign-release.sh "v$VERSION"
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa
         with:
           path: pages
