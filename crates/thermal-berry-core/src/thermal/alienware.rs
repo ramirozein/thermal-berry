@@ -111,11 +111,11 @@ impl Fan for AlienwareFan {
     }
 
     fn read_rpm(&self) -> Result<u32> {
-        read_number(&self.attr("input")).map(|v| v as u32)
+        read_number(&self.attr("input"))
     }
 
     fn read_boost(&self) -> Result<u8> {
-        read_number(&self.attr("boost")).map(|v| v.clamp(0, 255) as u8)
+        read_number(&self.attr("boost"))
     }
 
     fn set_boost(&self, value: u8) -> Result<()> {
@@ -135,7 +135,7 @@ impl Fan for AlienwareFan {
     }
 
     fn max_rpm(&self) -> Option<u32> {
-        read_number(&self.attr("max")).ok().map(|v| v as u32)
+        read_number(&self.attr("max")).ok()
     }
 }
 
@@ -150,8 +150,7 @@ impl TempSensor for HwmonTempSensor {
     }
 
     fn read_celsius(&self) -> Result<f32> {
-        // hwmon reports temperatures in millidegrees C.
-        read_number(&self.input_path).map(|v| v as f32 / 1000.0)
+        read_number::<i64>(&self.input_path).map(|v| v as f32 / 1000.0)
     }
 }
 
@@ -159,7 +158,7 @@ fn read_trimmed(path: &Path) -> Option<String> {
     fs::read_to_string(path).ok().map(|s| s.trim().to_string())
 }
 
-fn read_number(path: &Path) -> Result<i64> {
+fn read_number<T: std::str::FromStr>(path: &Path) -> Result<T> {
     let raw = fs::read_to_string(path).map_err(|e| ThermalError::from_io(path, e))?;
     raw.trim()
         .parse()
@@ -169,6 +168,24 @@ fn read_number(path: &Path) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_driver_feedback_cannot_be_used_as_an_rpm_or_boost() {
+        let path =
+            std::env::temp_dir().join(format!("thermal-berry-invalid-rpm-{}", std::process::id()));
+        fs::create_dir(&path).unwrap();
+        let fan = AlienwareFan {
+            hwmon_path: path.clone(),
+            id: "fan1".into(),
+            index: 1,
+            label: "Fan".into(),
+        };
+        fs::write(fan.attr("input"), "-1").unwrap();
+        fs::write(fan.attr("boost"), "256").unwrap();
+        fs::write(fan.attr("max"), "4294967296").unwrap();
+        assert!(fan.read_rpm().is_err() && fan.read_boost().is_err() && fan.max_rpm().is_none());
+        fs::remove_dir_all(path).unwrap();
+    }
 
     #[test]
     #[ignore]

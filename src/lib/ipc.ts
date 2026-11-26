@@ -31,6 +31,10 @@ export interface Config extends GeneralConfig {
         strategy: "adaptive" | "curve";
         targetTempC: number;
     };
+    predictive: {
+        cpuTargetC: number;
+        gpuTargetC: number;
+    };
     vendorOverride: string | null;
     historyRetentionDays: number;
     allFansBoost: AllFansBoost;
@@ -64,7 +68,7 @@ export interface StateSnapshot {
     control: ControlStatus;
 }
 
-export type ConfigPatch = Partial<Pick<Config, "updateIntervalSecs" | "tempUnit" | "theme" | "historyRetentionDays" | "automaticControl" | "curves">> & {allFansBoostPercent?: number};
+export type ConfigPatch = Partial<Pick<Config, "updateIntervalSecs" | "tempUnit" | "theme" | "historyRetentionDays" | "automaticControl" | "predictive" | "curves">> & {allFansBoostPercent?: number};
 
 export interface Sample {
     control: ControlStatus | null;

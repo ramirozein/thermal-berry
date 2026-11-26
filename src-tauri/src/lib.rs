@@ -1,13 +1,13 @@
 #[cfg(target_os = "linux")]
-pub mod automatic;
+pub use thermal_berry_core::automatic;
 #[cfg(target_os = "linux")]
 pub mod commands;
 #[cfg(target_os = "linux")]
-pub mod config;
+pub use thermal_berry_core::config;
 #[cfg(target_os = "linux")]
-pub mod curve;
+pub use thermal_berry_core::curve;
 #[cfg(target_os = "linux")]
-pub mod db;
+pub use thermal_berry_core::db;
 #[cfg(not(target_os = "linux"))]
 mod desktop_uninstall;
 mod lifecycle;
@@ -17,9 +17,9 @@ pub mod monitor;
 mod osd;
 mod preferences;
 #[cfg(target_os = "linux")]
-pub mod state;
+pub use thermal_berry_core::state;
 #[cfg(target_os = "linux")]
-pub mod thermal;
+pub use thermal_berry_core::thermal;
 pub mod tray;
 #[cfg(target_os = "linux")]
 pub mod uninstall;
@@ -31,7 +31,7 @@ mod windows_hardware;
 mod windows_temperatures;
 
 #[cfg(target_os = "linux")]
-mod fan_control;
+use thermal_berry_core::fan_control;
 pub mod readings;
 
 #[cfg(target_os = "linux")]
@@ -43,6 +43,19 @@ use tauri::{Manager, RunEvent, WindowEvent};
 use db::Db;
 #[cfg(target_os = "linux")]
 use state::AppState;
+
+fn lock_instance() -> thermal_berry_core::lock::InstanceLock {
+    thermal_berry_core::lock::InstanceLock::acquire("gui").unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(
+            if matches!(e, thermal_berry_core::lock::LockError::Busy(_)) {
+                2
+            } else {
+                1
+            },
+        )
+    })
+}
 
 fn builder() -> tauri::Builder<tauri::Wry> {
     let builder = tauri::Builder::default();
@@ -110,6 +123,7 @@ fn on_run(app: &tauri::AppHandle, event: RunEvent) {
 #[cfg(not(target_os = "linux"))]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let _instance = lock_instance();
     builder()
         .setup(|app| {
             preferences::desktop::setup(app.handle());
@@ -137,16 +151,13 @@ pub fn run() {
 
 #[cfg(target_os = "linux")]
 pub fn run() {
+    let _instance = lock_instance();
     let db = Db::open().unwrap_or_else(|e| {
         eprintln!("thermal-berry: could not open database ({e}), running in-memory");
         Db::open_in_memory().expect("in-memory sqlite always opens")
     });
     let config = db.load_config();
-    let device = config
-        .vendor_override
-        .as_deref()
-        .and_then(|vendor| thermal::create_device(vendor).ok())
-        .or_else(|| thermal::detect_device().ok());
+    let device = thermal::configured_device(config.vendor_override.as_deref());
     let state = Arc::new(AppState::new(device, config, db));
 
     let app = builder()

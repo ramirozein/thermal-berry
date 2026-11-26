@@ -35,6 +35,12 @@ pub trait ThermalDevice: Send + Sync {
 
 pub const VENDORS: &[&str] = &["alienware", thinkpad::VENDOR, "lenovo", "hp", "asus"];
 
+pub fn configured_device(vendor: Option<&str>) -> Option<Box<dyn ThermalDevice>> {
+    vendor
+        .and_then(|v| create_device(v).ok())
+        .or_else(|| detect_device().ok())
+}
+
 pub fn detect_device() -> Result<Box<dyn ThermalDevice>> {
     create_device("alienware").or_else(|_| Ok(Box::new(hwmon::HwmonDevice::detect(None)?)))
 }

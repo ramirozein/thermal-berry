@@ -1,13 +1,20 @@
+use crate::storage::{
+    data_directory,
+    unix::{private_directory, set_private_mode},
+};
 use std::collections::BTreeMap;
-use std::fs::{self, DirBuilder, File, OpenOptions};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::fs::{self, OpenOptions};
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(test)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use rusqlite::{params, Connection, OpenFlags};
 
-use crate::config::Config;
+use crate::config::{Config, FanMode};
 use crate::curve::CurvePoint;
+use crate::observation::Observation;
 use crate::state::{FanReading, Sample, TempReading};
 use crate::thermal::ThermalError;
 
@@ -51,6 +58,16 @@ CREATE TABLE IF NOT EXISTS fan_readings (
     max_rpm       INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_fan_readings_ts ON fan_readings(timestamp_ms);
+CREATE TABLE IF NOT EXISTS load_readings (
+    timestamp_ms INTEGER PRIMARY KEY, cpu_percent REAL, gpu_percent REAL, mem_percent REAL,
+    cpu_temp_c REAL, gpu_temp_c REAL, fan_percent REAL, rpm INTEGER, mode TEXT NOT NULL,
+    gpu_mem_percent REAL, gpu_power_w REAL
+);
+CREATE TABLE IF NOT EXISTS thermal_models (
+    die TEXT NOT NULL, coefficients_json TEXT NOT NULL, terms_json TEXT NOT NULL,
+    fitted_at_ms INTEGER NOT NULL, rmse_1step REAL NOT NULL, rmse_60s REAL NOT NULL,
+    samples_used INTEGER NOT NULL, PRIMARY KEY (fitted_at_ms, die)
+);
 ";
 
 fn db_err(e: impl std::fmt::Display) -> ThermalError {
@@ -59,25 +76,7 @@ fn db_err(e: impl std::fmt::Display) -> ThermalError {
 
 fn prepare_private_database(path: &Path) -> std::io::Result<()> {
     let directory = path.parent().expect("database has a parent");
-    fs::create_dir_all(
-        directory
-            .parent()
-            .expect("application directory has a parent"),
-    )?;
-    match DirBuilder::new().mode(0o700).create(directory) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error),
-    }
-
-    // SAFETY: geteuid takes no arguments and returns the current effective UID.
-    let uid = unsafe { libc::geteuid() };
-    let dir = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-        .open(directory)?;
-    set_private_mode(&dir, uid, 0o700, true)?;
-
+    let uid = private_directory(directory)?;
     let file_options = || {
         let mut options = OpenOptions::new();
         options
@@ -107,23 +106,11 @@ fn prepare_private_database(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn set_private_mode(file: &File, uid: u32, mode: u32, directory: bool) -> std::io::Result<()> {
-    let metadata = file.metadata()?;
-    if metadata.uid() != uid
-        || (directory && !metadata.is_dir())
-        || (!directory && (!metadata.is_file() || metadata.nlink() != 1))
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "unsafe database path",
-        ));
-    }
-    file.set_permissions(fs::Permissions::from_mode(mode))
-}
-
 impl Db {
     pub fn path() -> Option<PathBuf> {
-        dirs::data_dir().map(|dir| dir.join("thermal-berry").join("thermal-berry.db"))
+        data_directory()
+            .ok()
+            .map(|dir| dir.join("thermal-berry.db"))
     }
 
     pub fn open() -> DbResult<Self> {
@@ -141,7 +128,10 @@ impl Db {
     }
 
     fn init(conn: Connection, import_legacy: bool) -> DbResult<Self> {
-        conn.pragma_update(None, "journal_mode", "WAL").ok();
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(db_err)?;
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(db_err)?;
         conn.execute_batch(SCHEMA).map_err(db_err)?;
         let db = Self::from_connection(conn);
         if import_legacy {
@@ -251,6 +241,12 @@ impl Db {
             config.all_fans_boost.enabled = false;
         }
 
+        if let Some(v) = read("predictive.targets")
+            .and_then(|v| serde_json::from_str::<crate::config::PredictiveTargets>(&v).ok())
+            .filter(|v| v.is_valid())
+        {
+            config.predictive = v;
+        }
         if let Some(v) = read("automaticControl")
             .and_then(|v| serde_json::from_str::<crate::config::AutomaticControl>(&v).ok())
             .filter(|v| v.is_valid())
@@ -296,7 +292,11 @@ impl Db {
             let mut upsert = tx
                 .prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)")
                 .map_err(db_err)?;
-            let scalars: [(&str, String); 8] = [
+            let scalars = [
+                (
+                    "predictive.targets",
+                    serde_json::to_string(&config.predictive).map_err(db_err)?,
+                ),
                 (
                     "updateIntervalSecs",
                     config.update_interval_secs.to_string(),
@@ -356,6 +356,16 @@ impl Db {
     }
 
     pub fn insert_sample(&self, sample: &Sample) -> DbResult<()> {
+        self.insert_tick(sample, None)
+    }
+
+    pub fn insert_tick(&self, sample: &Sample, observation: Option<&Observation>) -> DbResult<()> {
+        let timestamp = i64::try_from(sample.timestamp_ms).map_err(db_err)?;
+        if observation.is_some_and(|o| o.timestamp_ms != sample.timestamp_ms) {
+            return Err(db_err(
+                "observation and raw readings must belong to the same tick",
+            ));
+        }
         let connection = self.connection();
         let tx = connection.unchecked_transaction().map_err(db_err)?;
         {
@@ -367,7 +377,7 @@ impl Db {
                 .map_err(db_err)?;
             for t in &sample.temps {
                 insert
-                    .execute(params![sample.timestamp_ms as i64, t.label, t.celsius])
+                    .execute(params![timestamp, t.label, t.celsius])
                     .map_err(db_err)?;
             }
             let mut insert = tx
@@ -380,7 +390,7 @@ impl Db {
             for f in &sample.fans {
                 insert
                     .execute(params![
-                        sample.timestamp_ms as i64,
+                        timestamp,
                         f.id,
                         f.label,
                         f.rpm,
@@ -390,7 +400,117 @@ impl Db {
                     .map_err(db_err)?;
             }
         }
+        if let Some(o) = observation {
+            tx.execute(
+                "INSERT INTO load_readings
+                 (timestamp_ms, cpu_percent, gpu_percent, mem_percent, cpu_temp_c, gpu_temp_c,
+                  fan_percent, rpm, mode, gpu_mem_percent, gpu_power_w)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    timestamp,
+                    o.cpu_percent,
+                    o.gpu_percent,
+                    o.mem_percent,
+                    o.cpu_temp_c,
+                    o.gpu_temp_c,
+                    o.fan_percent,
+                    o.rpm,
+                    o.mode.map(|m| m.as_str()).unwrap_or("unknown"),
+                    o.gpu_mem_percent,
+                    o.gpu_power_w
+                ],
+            )
+            .map_err(db_err)?;
+        }
         tx.commit().map_err(db_err)
+    }
+
+    pub fn save_identification(&self, report: &crate::identify::Report) -> DbResult<()> {
+        if !report.accepted {
+            return Err(db_err("model did not pass M1 validation"));
+        }
+        let conn = self.connection();
+        let tx = conn.unchecked_transaction().map_err(db_err)?;
+        let fitted = crate::readings::now_ms() as i64;
+        let save = |die: &str,
+                    c: &crate::model::Coefficients,
+                    e: &crate::identify::Errors|
+         -> DbResult<()> {
+            let mut terms = Vec::new();
+            let mut values = Vec::new();
+            for (term, &value) in crate::model::TERMS.iter().zip(c) {
+                if value != 0.0 {
+                    terms.push(term);
+                    values.push(value);
+                }
+            }
+            tx.execute(
+                "INSERT INTO thermal_models (die, coefficients_json, terms_json, fitted_at_ms,
+                    rmse_1step, rmse_60s, samples_used) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    die,
+                    serde_json::to_string(&values).map_err(db_err)?,
+                    serde_json::to_string(&terms).map_err(db_err)?,
+                    fitted,
+                    e.rmse_1step,
+                    e.rmse_60s,
+                    report.samples_used as i64
+                ],
+            )
+            .map_err(db_err)?;
+            Ok(())
+        };
+        save("cpu", &report.model.cpu, &report.sindy.cpu)?;
+        if let (Some(c), Some(e)) = (&report.model.gpu, &report.sindy.gpu) {
+            save("gpu", c, e)?;
+        }
+        tx.commit().map_err(db_err)
+    }
+
+    pub fn observations(&self, from_ms: u64, to_ms: u64) -> DbResult<Vec<Observation>> {
+        let conn = self.connection();
+        let mut statement = conn.prepare(
+            "SELECT timestamp_ms, cpu_temp_c, gpu_temp_c, cpu_percent, gpu_percent, fan_percent,
+                    rpm, mode, mem_percent, gpu_mem_percent, gpu_power_w FROM load_readings
+             WHERE timestamp_ms BETWEEN ?1 AND ?2 ORDER BY timestamp_ms LIMIT ?3"
+        ).map_err(db_err)?;
+        let rows = statement
+            .query_map(
+                params![
+                    i64::try_from(from_ms).map_err(db_err)?,
+                    i64::try_from(to_ms).map_err(db_err)?,
+                    MAX_RANGE_ROWS + 1
+                ],
+                |r| {
+                    let mode: String = r.get(7)?;
+                    Ok(Observation {
+                        timestamp_ms: u64::try_from(r.get::<_, i64>(0)?)
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        cpu_temp_c: r.get(1)?,
+                        gpu_temp_c: r.get(2)?,
+                        cpu_percent: r.get(3)?,
+                        gpu_percent: r.get(4)?,
+                        fan_percent: r.get(5)?,
+                        rpm: r.get(6)?,
+                        mode: match mode.as_str() {
+                            "manual" => Some(FanMode::Manual),
+                            "disabled" => Some(FanMode::Disabled),
+                            "auto" => Some(FanMode::Auto),
+                            "unknown" => None,
+                            _ => return Err(rusqlite::Error::InvalidQuery),
+                        },
+                        mem_percent: r.get(8)?,
+                        gpu_mem_percent: r.get(9)?,
+                        gpu_power_w: r.get(10)?,
+                    })
+                },
+            )
+            .map_err(db_err)?;
+        let rows: Vec<_> = rows.collect::<rusqlite::Result<_>>().map_err(db_err)?;
+        if rows.len() > MAX_RANGE_ROWS as usize {
+            return Err(db_err("select a shorter calibration session"));
+        }
+        Ok(rows)
     }
 
     pub fn query_range(&self, from_ms: u64, to_ms: u64) -> DbResult<Vec<Sample>> {
@@ -491,6 +611,11 @@ impl Db {
             [cutoff_ms as i64],
         )
         .map_err(db_err)?;
+        tx.execute(
+            "DELETE FROM load_readings WHERE timestamp_ms < ?1",
+            [cutoff_ms as i64],
+        )
+        .map_err(db_err)?;
         tx.commit().map_err(db_err)?;
         connection
             .execute_batch("PRAGMA wal_checkpoint(PASSIVE);")
@@ -503,6 +628,8 @@ impl Db {
 mod tests {
     use super::*;
     use crate::config::FanMode;
+    use std::fs::DirBuilder;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 
     fn sample(ts: u64) -> Sample {
         Sample {
@@ -526,10 +653,13 @@ mod tests {
     #[test]
     fn config_roundtrip() {
         let db = Db::open_in_memory().unwrap();
-        let mut config = Config::default();
-        config.update_interval_secs = 5;
-        config.mode = FanMode::Manual;
+        let mut config = Config {
+            update_interval_secs: 5,
+            mode: FanMode::Manual,
+            ..Config::default()
+        };
         config.automatic_control.target_temp_c = 65.0;
+        config.predictive.gpu_target_c = 72.0;
         config.automatic_control.strategy = crate::config::AutoStrategy::Curve;
         config.vendor_override = Some("alienware".into());
         config.manual_boosts.insert("fan1".into(), 42);
@@ -554,6 +684,7 @@ mod tests {
         assert_eq!(loaded.update_interval_secs, 5);
         assert_eq!(loaded.mode, FanMode::Manual);
         assert_eq!(loaded.automatic_control, config.automatic_control);
+        assert_eq!(loaded.predictive, config.predictive);
         assert_eq!(loaded.vendor_override.as_deref(), Some("alienware"));
         assert_eq!(loaded.manual_boosts.get("fan1"), Some(&42));
         assert_eq!(loaded.curves.get("fan2").unwrap().len(), 2);
@@ -566,6 +697,13 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let config = db.load_config();
         assert_eq!(config.update_interval_secs, 2);
+        assert_eq!(
+            (
+                config.predictive.cpu_target_c,
+                config.predictive.gpu_target_c
+            ),
+            (70.0, 75.0)
+        );
         assert_eq!(config.mode, FanMode::Auto);
         assert!(!config.all_fans_boost.enabled);
     }
@@ -681,5 +819,63 @@ mod tests {
         let all = db.query_range(0, u64::MAX / 2).unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].timestamp_ms, 5000);
+    }
+}
+
+#[cfg(test)]
+mod predictive_storage_tests {
+    use super::*;
+    use crate::config::FanMode;
+
+    #[test]
+    fn additive_migration_keeps_existing_history_and_does_not_invent_loads() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO settings VALUES ('updateIntervalSecs','9');
+            CREATE TABLE temp_readings (timestamp_ms INTEGER NOT NULL, label TEXT NOT NULL, celsius REAL NOT NULL);
+            INSERT INTO temp_readings VALUES (2000,'CPU',56.5);").unwrap();
+        let db = Db::init(conn, false).unwrap();
+        assert_eq!(db.load_config().update_interval_secs, 9);
+        assert_eq!(db.query_range(0, 3000).unwrap()[0].temps[0].celsius, 56.5);
+        assert!(db.observations(0, 3000).unwrap().is_empty());
+    }
+
+    #[test]
+    fn joined_ticks_are_atomic_nullable_and_age_out_with_legacy_history() {
+        let db = Db::open_in_memory().unwrap();
+        let sample = Sample {
+            timestamp_ms: 12345,
+            temps: vec![TempReading {
+                label: "CPU".into(),
+                celsius: 42.0,
+            }],
+            fans: vec![],
+            control: None,
+            errors: vec![],
+        };
+        let o = Observation {
+            timestamp_ms: sample.timestamp_ms,
+            mode: Some(FanMode::Manual),
+            cpu_temp_c: Some(42.0),
+            cpu_percent: Some(30.0),
+            mem_percent: Some(40.0),
+            gpu_temp_c: None,
+            gpu_percent: None,
+            fan_percent: None,
+            rpm: None,
+            gpu_mem_percent: None,
+            gpu_power_w: None,
+        };
+        let mut other_tick = o.clone();
+        other_tick.timestamp_ms += 1;
+        assert!(db.insert_tick(&sample, Some(&other_tick)).is_err());
+        assert!(db.query_range(0, 20000).unwrap().is_empty());
+        db.insert_tick(&sample, Some(&o)).unwrap();
+        assert!(db.insert_tick(&sample, Some(&o)).is_err());
+        assert_eq!(db.observations(0, 20000).unwrap(), vec![o]);
+        assert_eq!(db.query_range(0, 20000).unwrap()[0].temps.len(), 1);
+        db.purge_older_than(12346).unwrap();
+        assert!(db.observations(0, 20000).unwrap().is_empty());
+        assert!(db.query_range(0, 20000).unwrap().is_empty());
     }
 }

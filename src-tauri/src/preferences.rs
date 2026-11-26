@@ -1,26 +1,11 @@
 use std::fs;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::AppHandle;
 use tauri_plugin_autostart::ManagerExt;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TempUnit {
-    #[default]
-    Celsius,
-    Fahrenheit,
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Theme {
-    #[default]
-    System,
-    Light,
-    Dark,
-}
+pub use thermal_berry_core::config::TempUnit;
 
 #[tauri::command]
 pub fn get_autostart(app: AppHandle) -> Result<bool, String> {
@@ -63,6 +48,8 @@ pub mod desktop {
     use tauri::{Manager, State};
 
     use super::*;
+    use serde::Deserialize;
+    use thermal_berry_core::config::Theme;
 
     #[derive(Clone, Copy, Serialize, Deserialize)]
     #[serde(default, rename_all = "camelCase")]

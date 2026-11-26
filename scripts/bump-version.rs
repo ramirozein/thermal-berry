@@ -4,7 +4,7 @@ const FILES: [&str; 4] = [
     "src-tauri/Cargo.toml",
     "package.json",
     "src-tauri/tauri.conf.json",
-    "src-tauri/Cargo.lock",
+    "Cargo.lock",
 ];
 
 fn main() -> ExitCode {
@@ -76,7 +76,7 @@ fn version_range(content: &str, path: &str) -> Result<Range<usize>, String> {
                 .trim_start()
                 .strip_prefix("version")
                 .and_then(|rest| rest.trim_start().strip_prefix('=')),
-            "src-tauri/Cargo.lock" if target_package => line
+            "Cargo.lock" if target_package => line
                 .trim_start()
                 .strip_prefix("version")
                 .and_then(|rest| rest.trim_start().strip_prefix('=')),
@@ -112,4 +112,4 @@ fn version_range(content: &str, path: &str) -> Result<Range<usize>, String> {
 }
 
 
-// rustc scripts/bump-version.rs -o /tmp/thermal-berry-bump-version && /tmp/thermal-berry-bump-version 1.2.1
+// rustc scripts/bump-version.rs -o /tmp/thermal-berry-bump-version && /tmp/thermal-berry-bump-version 1.3.0
