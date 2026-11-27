@@ -2,20 +2,40 @@
 set -euo pipefail
 
 version=${1:?missing release version}
-[[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+export LC_ALL=C
 : "${THERMAL_BERRY_RELEASE_PUBLIC_KEY:?missing release public key}"
-: "${THERMAL_BERRY_RELEASE_FINGERPRINT:?missing release fingerprint}"
-: "${THERMAL_BERRY_RELEASE_SIGNING_KEY:?missing signing key}"
-[[ $THERMAL_BERRY_RELEASE_FINGERPRINT =~ ^[0-9A-F]{40}$ ]]
+expected=${THERMAL_BERRY_RELEASE_FINGERPRINT:-}
+signing_key=${THERMAL_BERRY_RELEASE_SIGNING_KEY:-}
+unset THERMAL_BERRY_RELEASE_SIGNING_KEY
+if [[ $version != --public-key ]]; then
+    [[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+    : "${expected:?missing release fingerprint}"
+    : "${signing_key:?missing signing key}"
+fi
+[[ -z $expected || $expected =~ ^[0-9A-F]{40}$ ]]
 
 export GNUPGHOME
 GNUPGHOME=$(mktemp -d)
 trap 'gpgconf --kill gpg-agent || true; rm -rf -- "$GNUPGHOME"' EXIT
-printf '%s\n' "$THERMAL_BERRY_RELEASE_PUBLIC_KEY" | gpg --batch --dearmor > release-keyring.gpg
-key_info=$(gpg --batch --show-keys --with-colons release-keyring.gpg)
-actual=$(awk -F: '$1=="pub" {count++} $1=="fpr" && !fingerprint {fingerprint=$10} END {if (count != 1) exit 1; print fingerprint}' <<< "$key_info")
-[[ "$actual" == "$THERMAL_BERRY_RELEASE_FINGERPRINT" ]]
-printf '%s\n' "$THERMAL_BERRY_RELEASE_SIGNING_KEY" | gpg --batch --import
+key_info=$(printf '%s\n' "$THERMAL_BERRY_RELEASE_PUBLIC_KEY" | gpg --batch --show-keys --with-colons)
+actual=$(awk -F: '
+    $1=="pub" {count++}
+    $1=="sec" || $1=="ssb" {secret=1}
+    $1=="fpr" && !fingerprint {fingerprint=$10}
+    END {if (secret || count != 1 || !fingerprint) exit 1; print fingerprint}
+' <<< "$key_info") || { echo 'Expected a single public key without secret key material.' >&2; exit 1; }
+[[ -z $expected || $actual == "$expected" ]] || { echo 'Release key fingerprint does not match.' >&2; exit 1; }
+printf '%s\n' "$THERMAL_BERRY_RELEASE_PUBLIC_KEY" | gpg --batch --import
+if [[ $version == --public-key ]]; then
+    public_key=$(gpg --batch --armor --export "$actual")
+    [[ -n $public_key ]]
+    printf '%s\n' "$public_key"
+    exit 0
+fi
+gpg --batch --export "$actual" > release-keyring.gpg
+[[ -s release-keyring.gpg ]]
+printf '%s\n' "$signing_key" | gpg --batch --import
+unset signing_key
 sign=(gpg --batch --local-user "$actual" --digest-algo SHA256)
 
 mkdir -p signed "pages/apt/pool/main/t/thermal-berry/${version#v}" pages/apt/dists/stable/main/binary-amd64

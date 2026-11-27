@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  DO_NOT_TRACK: '1'
+
 concurrency:
   group: thermal-berry-release-${{ github.ref }}
   cancel-in-progress: false
@@ -119,7 +122,13 @@ jobs:
         if: matrix.platform == 'linux'
         env:
           THERMAL_BERRY_RELEASE_PUBLIC_KEY: ${{ vars.THERMAL_BERRY_RELEASE_PUBLIC_KEY }}
-        run: bun run tauri build -- --locked
+          THERMAL_BERRY_RELEASE_FINGERPRINT: ${{ vars.THERMAL_BERRY_RELEASE_FINGERPRINT }}
+        run: |
+          if [[ -n "$THERMAL_BERRY_RELEASE_PUBLIC_KEY" ]]; then
+            THERMAL_BERRY_RELEASE_PUBLIC_KEY=$(bash scripts/sign-release.sh --public-key)
+            export THERMAL_BERRY_RELEASE_PUBLIC_KEY
+          fi
+          bun run tauri build -- --locked
 
       - name: Collect Linux packages
         if: matrix.platform == 'linux'
@@ -216,6 +225,7 @@ jobs:
       - name: Verify and publish GitHub release
         shell: bash
         env:
+          LC_ALL: C
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.check-version.outputs.version }}
           THERMAL_BERRY_RELEASE_PUBLIC_KEY: ${{ vars.THERMAL_BERRY_RELEASE_PUBLIC_KEY }}
