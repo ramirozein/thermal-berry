@@ -3,7 +3,23 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::curve::CurvePoint;
-pub use crate::preferences::{TempUnit, Theme};
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TempUnit {
+    #[default]
+    Celsius,
+    Fahrenheit,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -11,6 +27,16 @@ pub enum FanMode {
     Auto,
     Manual,
     Disabled,
+}
+
+impl FanMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Manual => "manual",
+            Self::Disabled => "disabled",
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -43,6 +69,30 @@ impl AutomaticControl {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PredictiveTargets {
+    pub cpu_target_c: f32,
+    pub gpu_target_c: f32,
+}
+
+impl Default for PredictiveTargets {
+    fn default() -> Self {
+        Self {
+            cpu_target_c: 70.0,
+            gpu_target_c: 75.0,
+        }
+    }
+}
+
+impl PredictiveTargets {
+    pub fn is_valid(&self) -> bool {
+        [self.cpu_target_c, self.gpu_target_c]
+            .iter()
+            .all(|v| (50.0..=85.0).contains(v))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AllFansBoost {
@@ -70,6 +120,7 @@ pub struct Config {
     pub mode: FanMode,
     pub manual_boosts: HashMap<String, u8>,
     pub automatic_control: AutomaticControl,
+    pub predictive: PredictiveTargets,
     pub curves: HashMap<String, Vec<CurvePoint>>,
     pub vendor_override: Option<String>,
     pub history_retention_days: u32,
@@ -87,6 +138,7 @@ impl Default for Config {
             mode: FanMode::Auto,
             manual_boosts: HashMap::new(),
             automatic_control: AutomaticControl::default(),
+            predictive: PredictiveTargets::default(),
             curves: HashMap::new(),
             vendor_override: None,
             history_retention_days: 7,

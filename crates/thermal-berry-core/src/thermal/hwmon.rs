@@ -248,7 +248,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    use crate::{commands, config::FanMode, db::Db, monitor, state::AppState};
+    use crate::{config::FanMode, control, db::Db, monitor, state::AppState};
 
     use super::*;
 
@@ -350,7 +350,7 @@ mod tests {
             Default::default(),
             Db::open_in_memory().unwrap(),
         ));
-        commands::restore_control(&state);
+        control::restore_control(&state);
         let sample = monitor::tick(&state, 2.0).unwrap();
         assert!(sample.errors.is_empty());
         assert_eq!(sample.fans[0].rpm, Some(1900));
@@ -359,18 +359,18 @@ mod tests {
 
         let epoch = state.lock().config.control_epoch;
         assert!(matches!(
-            commands::apply_fan_boost(&state, fan_id, 60, epoch),
+            control::apply_fan_boost(&state, fan_id, 60, epoch),
             Err(ThermalError::Unsupported)
         ));
         assert!(matches!(
-            commands::apply_mode(&state, FanMode::Auto),
+            control::apply_mode(&state, FanMode::Auto),
             Err(ThermalError::Unsupported)
         ));
         assert!(matches!(
-            commands::apply_all_fans_boost(&state, true, 100),
+            control::apply_all_fans_boost(&state, true, 100),
             Err(ThermalError::Unsupported)
         ));
-        commands::begin_maintenance(&state).unwrap();
+        control::begin_maintenance(&state).unwrap();
         assert!(monitor::tick(&state, 2.0).is_none());
         crate::fan_control::return_to_firmware(&state);
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 export LC_ALL=C
-root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 fixture=$(mktemp -d)
 export GNUPGHOME="$fixture/keys"
 cleanup() {
@@ -18,7 +18,7 @@ THERMAL_BERRY_RELEASE_SIGNING_KEY=$(gpg --batch --armor --export-secret-keys "$T
 THERMAL_BERRY_RELEASE_PUBLIC_KEY=$(gpg --batch --armor --export "$THERMAL_BERRY_RELEASE_FINGERPRINT")
 export THERMAL_BERRY_RELEASE_FINGERPRINT THERMAL_BERRY_RELEASE_SIGNING_KEY THERMAL_BERRY_RELEASE_PUBLIC_KEY
 
-signer="$root/scripts/sign-release.sh"
+signer="$root/release/sign-release.sh"
 public_key=$(bash "$signer" --public-key)
 [[ $public_key == "$THERMAL_BERRY_RELEASE_PUBLIC_KEY" ]]
 for argument in --public-key v1.2.0; do

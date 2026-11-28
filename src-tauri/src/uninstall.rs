@@ -1,5 +1,4 @@
 use std::fs;
-use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -52,11 +51,11 @@ fn uninstall_blocking(state: &Arc<AppState>, app: &AppHandle) -> CmdResult<()> {
         let method = detect_install_method();
         run_privileged_removal(method)?;
         state.close_database();
-        if let Some(db_dir) = Db::path().and_then(|p| p.parent().map(PathBuf::from)) {
-            if let Err(error) = fs::remove_dir_all(&db_dir) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    return Err(ThermalError::from_io(&db_dir, error));
-                }
+        if let Some(db) = Db::path() {
+            // Keep the locked inode until this GUI has finished its firmware handoff.
+            remove_file_if_present(&db)?;
+            for suffix in ["db-wal", "db-shm", "db-journal"] {
+                remove_file_if_present(&db.with_extension(suffix))?;
             }
         }
         if let Some(config) = dirs::config_dir() {
@@ -80,7 +79,7 @@ pub(crate) fn recover_after_failure(state: &AppState, error: ThermalError) -> Th
     let mut inner = state.lock();
     // Authorization cancellation resumes read-only monitoring in Disabled.
     // Once deletion starts the connection stays closed and monitoring paused.
-    inner.control.maintenance = inner.shutting_down || inner.db.is_none();
+    inner.finish_maintenance();
     let message = format!(
         "Uninstall failed: {error}. Fan control remains disabled.{}",
         if inner.control.maintenance {
@@ -145,5 +144,31 @@ fn remove_appimage_files() {
             home.join(".local/share/applications")
                 .join(format!("{BIN_NAME}.desktop")),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, FanMode};
+
+    #[test]
+    fn cancelled_removal_reports_disabled_fans_and_resumes_only_with_an_open_database() {
+        let state = AppState::new(
+            None,
+            Config {
+                mode: FanMode::Disabled,
+                ..Config::default()
+            },
+            Db::open_in_memory().unwrap(),
+        );
+        commands::begin_maintenance(&state).unwrap();
+        let error = recover_after_failure(&state, ThermalError::Control("cancelled".into()));
+        assert!(error.to_string().contains("remains disabled"));
+        assert!(!state.lock().control.maintenance);
+        state.close_database();
+        let error = recover_after_failure(&state, ThermalError::Control("delete failed".into()));
+        assert!(error.to_string().contains("Monitoring remains paused"));
+        assert!(state.lock().control.maintenance);
     }
 }

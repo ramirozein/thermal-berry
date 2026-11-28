@@ -93,7 +93,11 @@ pub(crate) fn apply_automatic(
     };
 }
 
-pub(crate) fn return_to_firmware(state: &AppState) {
+pub(crate) fn release_fan(fan: &dyn Fan) -> crate::thermal::Result<()> {
+    fan.set_boost(fan.boost_range().0)
+}
+
+pub fn return_to_firmware(state: &AppState) {
     let mut inner = state.lock();
     inner.shutting_down = true;
     inner.control.maintenance = true;
@@ -103,7 +107,7 @@ pub(crate) fn return_to_firmware(state: &AppState) {
         .filter(|device| device.supports_fan_control())
     {
         for fan in device.fans() {
-            if let Err(error) = fan.set_boost(fan.boost_range().0) {
+            if let Err(error) = release_fan(fan.as_ref()) {
                 eprintln!(
                     "thermal-berry: could not return {} to firmware on exit: {error}",
                     fan.id()

@@ -1,9 +1,10 @@
 use std::sync::{mpsc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::Serialize;
-use sysinfo::{MemoryRefreshKind, System, MINIMUM_CPU_UPDATE_INTERVAL};
+use sysinfo::MINIMUM_CPU_UPDATE_INTERVAL;
 use tauri::{AppHandle, Emitter, Manager, State};
+use thermal_berry_core::load::SystemLoad;
 
 use crate::readings::now_ms;
 
@@ -203,7 +204,7 @@ pub fn spawn(app: AppHandle) -> MetricsWorker {
     let (stop, stopped) = mpsc::channel();
     std::thread::spawn(move || {
         let mut system = loop {
-            match System::new() {
+            match SystemLoad::new() {
                 Ok(system) => break system,
                 Err(error) => {
                     eprintln!("thermal-berry: could not initialize system metrics: {error}");
@@ -218,8 +219,6 @@ pub fn spawn(app: AppHandle) -> MetricsWorker {
                 }
             }
         };
-        system.refresh_cpu_usage();
-        let mut previous_cpu = Instant::now();
         loop {
             #[cfg(target_os = "linux")]
             let (interval, temp_unit) = (INTERVAL, crate::preferences::TempUnit::Celsius);
@@ -234,20 +233,11 @@ pub fn spawn(app: AppHandle) -> MetricsWorker {
             };
             let interval = interval.max(MINIMUM_CPU_UPDATE_INTERVAL);
             let timestamp = now_ms();
-            system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
-            let memory = memory_reading(system.used_memory(), system.total_memory());
-            let cpu = if previous_cpu.elapsed() >= MINIMUM_CPU_UPDATE_INTERVAL {
-                system.refresh_cpu_usage();
-                previous_cpu = Instant::now();
-                Some(Reading::sampled(
-                    (!system.cpus().is_empty())
-                        .then(|| system.global_cpu_usage())
-                        .filter(|usage| (0.0..=100.0).contains(usage)),
-                    timestamp,
-                ))
-            } else {
-                None
-            };
+            let load = system.read();
+            let memory = memory_reading(load.used_bytes, load.total_bytes);
+            let cpu = load
+                .cpu_percent
+                .map(|value| Reading::sampled(value, timestamp));
             let summary = format!(
                 "CPU {} · RAM {}",
                 cpu.as_ref()

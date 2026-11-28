@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/thermal-berry-core", "crates/thermal-berry-headless", "scripts", "src-tauri"]
+resolver = "2"

@@ -59,13 +59,13 @@ jobs:
         include:
           - platform: linux
             runner: ubuntu-22.04
-            packages: src-tauri/target/release/bundle/release-assets/*
+            packages: target/release/bundle/release-assets/*
           - platform: windows
             runner: windows-latest
-            packages: src-tauri/target/release/bundle/nsis/*-setup.exe
+            packages: target/release/bundle/nsis/*-setup.exe
           - platform: macos
             runner: macos-15
-            packages: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            packages: target/universal-apple-darwin/release/bundle/dmg/*.dmg
     name: Build ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -90,8 +90,6 @@ jobs:
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: src-tauri
 
       - name: Install Linux build dependencies
         if: matrix.platform == 'linux'
@@ -117,8 +115,8 @@ jobs:
         if: matrix.platform == 'linux'
         run: |
           bun run build
-          cargo test --locked --manifest-path src-tauri/Cargo.toml
-          bash tests/signed-release.sh
+          cargo test --locked --workspace
+          bash release/tests/signed-release.sh
 
       - name: Build Linux packages
         if: matrix.platform == 'linux'
@@ -127,7 +125,7 @@ jobs:
           THERMAL_BERRY_RELEASE_FINGERPRINT: ${{ vars.THERMAL_BERRY_RELEASE_FINGERPRINT }}
         run: |
           if [[ -n "$THERMAL_BERRY_RELEASE_PUBLIC_KEY" ]]; then
-            THERMAL_BERRY_RELEASE_PUBLIC_KEY=$(bash scripts/sign-release.sh --public-key)
+            THERMAL_BERRY_RELEASE_PUBLIC_KEY=$(bash release/sign-release.sh --public-key)
             export THERMAL_BERRY_RELEASE_PUBLIC_KEY
           fi
           bun run tauri build -- --locked
@@ -136,7 +134,7 @@ jobs:
         if: matrix.platform == 'linux'
         shell: bash
         run: |
-          cd src-tauri/target/release/bundle
+          cd target/release/bundle
           mkdir -p release-assets
           cp deb/*.deb appimage/*.AppImage rpm/*.rpm release-assets/
 
@@ -154,7 +152,7 @@ jobs:
         if: matrix.platform == 'macos'
         shell: bash
         run: |
-          app=src-tauri/target/universal-apple-darwin/release/bundle/macos/thermal-berry.app
+          app=target/universal-apple-darwin/release/bundle/macos/thermal-berry.app
           codesign --verify --deep --strict "$app"
           codesign --display --verbose=4 "$app" 2>&1 | grep -Fx 'Signature=adhoc'
           lipo "$app/Contents/MacOS/thermal-berry" -verify_arch arm64 x86_64
@@ -189,7 +187,7 @@ jobs:
           THERMAL_BERRY_RELEASE_PUBLIC_KEY: ${{ vars.THERMAL_BERRY_RELEASE_PUBLIC_KEY }}
           THERMAL_BERRY_RELEASE_FINGERPRINT: ${{ vars.THERMAL_BERRY_RELEASE_FINGERPRINT }}
           THERMAL_BERRY_RELEASE_SIGNING_KEY: ${{ secrets.THERMAL_BERRY_RELEASE_SIGNING_KEY }}
-        run: bash scripts/sign-release.sh "v$VERSION"
+        run: bash release/sign-release.sh "v$VERSION"
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa
         with:
           path: pages

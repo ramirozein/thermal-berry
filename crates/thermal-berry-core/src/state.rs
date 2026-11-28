@@ -8,6 +8,7 @@ use crate::config::{Config, FanMode};
 use crate::curve::Hysteresis;
 use crate::db::Db;
 use crate::thermal::ThermalDevice;
+use crate::thermal::ThermalError;
 
 pub const HISTORY_CAPACITY: usize = 60;
 
@@ -93,7 +94,17 @@ impl AppState {
         }
     }
 
-    pub(crate) fn close_database(&self) {
+    pub fn history_range(&self, from_ms: u64, to_ms: u64) -> Result<Vec<Sample>, ThermalError> {
+        let _history_io = self.history_io.read().unwrap();
+        let db = self
+            .lock()
+            .db
+            .clone()
+            .ok_or_else(|| ThermalError::Database("database is closed".into()))?;
+        db.query_range(from_ms, to_ms)
+    }
+
+    pub fn close_database(&self) {
         let _history_io = self.history_io.write().unwrap();
         drop(self.history_db.lock().unwrap().take());
         drop(self.lock().db.take());
@@ -107,6 +118,10 @@ impl AppState {
 }
 
 impl Inner {
+    pub fn finish_maintenance(&mut self) {
+        self.control.maintenance = self.shutting_down || self.db.is_none();
+    }
+
     pub fn snapshot(&self) -> StateSnapshot {
         let mut control = self.control.clone();
         control.config_revision = self.config.revision;

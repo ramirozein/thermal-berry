@@ -51,7 +51,7 @@ pub fn evaluate(points: &[CurvePoint], temp_c: f32) -> u8 {
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Hysteresis {
-    applied: Option<(f32, u8)>, // (temp at which it was applied, % applied)
+    applied: Option<(f32, u8)>,
 }
 
 impl Hysteresis {
