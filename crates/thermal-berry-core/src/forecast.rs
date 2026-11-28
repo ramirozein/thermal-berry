@@ -32,6 +32,8 @@ impl ThermalModel {
             || !t.gpu.is_none_or(|v| (0.0..=150.0).contains(&v))
             || !pct(u.cpu_percent)
             || !pct(u.fan_percent)
+            || !u.second_fan_percent.is_none_or(pct)
+            || (self.fan_ids.len() == 2) != u.second_fan_percent.is_some()
             || !u.gpu_percent.is_none_or(pct)
             || (self.gpu.is_some() && (t.gpu.is_none() || u.gpu_percent.is_none()))
         {

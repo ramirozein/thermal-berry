@@ -263,7 +263,7 @@ pub(crate) fn change_udev_access(action: &str) -> CmdResult<()> {
         .args([
             "/bin/bash",
             "-c",
-            include_str!("../../scripts/udev-access.sh"),
+            include_str!("../packaging/linux/udev-access.sh"),
             "thermal-berry-udev",
             action,
         ])

@@ -4,14 +4,15 @@ use crate::config::FanMode;
 use crate::forecast::{ForecastInterval, ResidualBand};
 use crate::linalg::Regression;
 use crate::model::{
-    features, Coefficients, Inputs, Temperature, ThermalModel, CPU_TERMS, JOINT_TERMS, TERMS,
+    candidate_terms, features, term_names, Coefficients, Inputs, Temperature, ThermalModel,
+    FEATURE_COUNT,
 };
-use crate::observation::Observation;
+use crate::observation::{valid_fan_id, Observation};
 use serde::Serialize;
 
 pub const SESSION_SECS: u64 = 45 * 60;
 pub const MAX_SAMPLES: usize = 20_000;
-type Fit = Regression<{ TERMS.len() }>;
+type Fit = Regression<FEATURE_COUNT>;
 
 #[derive(Debug, Clone, Copy)]
 struct Frame {
@@ -43,7 +44,7 @@ pub struct Report {
     pub holdout_samples: usize,
     pub threshold_fraction: f64,
     pub ticks_per_equation: usize,
-    pub terms: &'static [&'static str],
+    pub terms: Vec<&'static str>,
     pub model: ThermalModel,
     pub sindy: Scores,
     pub persistence: Scores,
@@ -56,9 +57,56 @@ pub struct Report {
     pub accepted: bool,
 }
 
-fn frames(rows: &[Observation], cpu_only: bool) -> Result<Vec<Frame>, String> {
+fn measured_boost(percent: Option<f64>, rpm: Option<u32>) -> Result<Option<f64>, String> {
+    if rpm == Some(0) || percent.is_some_and(|p| !(30.0..=100.0).contains(&p)) {
+        return Err("session contains a stopped fan or an unsafe fan boost".into());
+    }
+    Ok(percent.zip(rpm).map(|(p, _)| p))
+}
+
+fn fan_inputs(r: &Observation, ids: &[String]) -> Result<Option<(f64, Option<f64>)>, String> {
+    if r.fans.len() != ids.len() {
+        return Err("fan topology changed during the session".into());
+    }
+    if ids.is_empty() {
+        return Ok(measured_boost(r.fan_percent, r.rpm)?.map(|p| (p, None)));
+    }
+    if ids.len() == 2 && (r.fan_percent.is_some() || r.rpm.is_some()) {
+        return Err("independent fans require separate boosts and RPM".into());
+    }
+    let mut values = [None; 2];
+    for (i, id) in ids.iter().enumerate() {
+        let fan = r
+            .fans
+            .iter()
+            .find(|f| &f.id == id)
+            .ok_or("fan channel changed during the session")?;
+        if ids.len() == 1
+            && (r.fan_percent.is_some() && r.fan_percent != fan.percent
+                || r.rpm.is_some() && r.rpm != fan.rpm)
+        {
+            return Err("shared fan readings disagree".into());
+        }
+        values[i] = measured_boost(fan.percent, fan.rpm)?;
+    }
+    Ok(if ids.len() == 2 {
+        values[0].zip(values[1]).map(|(a, b)| (a, Some(b)))
+    } else {
+        values[0].map(|a| (a, None))
+    })
+}
+
+fn frames(rows: &[Observation], cpu_only: bool) -> Result<(Vec<Frame>, Vec<String>), String> {
     if rows.len() < 2 || rows.len() > MAX_SAMPLES {
         return Err("expected a bounded 45-minute calibration session".into());
+    }
+    let mut ids: Vec<_> = rows[0].fans.iter().map(|f| f.id.clone()).collect();
+    ids.sort();
+    if ids.len() > 2
+        || ids.iter().any(|id| !valid_fan_id(id))
+        || ids.windows(2).any(|w| w[0] == w[1])
+    {
+        return Err("expected one or two uniquely identified fan channels".into());
     }
     let joint = !cpu_only
         && rows
@@ -93,13 +141,11 @@ fn frames(rows: &[Observation], cpu_only: bool) -> Result<Vec<Frame>, String> {
                 .flatten()
                 .any(|v| !(0.0..90.0).contains(&v))
             || r.gpu_power_w.is_some_and(|p| !p.is_finite() || p < 0.0)
-            || r.rpm == Some(0)
-            || r.fan_percent.is_some_and(|f| f < 30.0)
         {
             return Err("session contains an invalid, stopped-fan or unsafe reading".into());
         }
-        let (Some(cpu), Some(cpu_percent), Some(fan_percent), Some(_)) =
-            (r.cpu_temp_c, r.cpu_percent, r.fan_percent, r.rpm)
+        let (Some(cpu), Some(cpu_percent), Some((fan_percent, second_fan_percent))) =
+            (r.cpu_temp_c, r.cpu_percent, fan_inputs(r, &ids)?)
         else {
             continue;
         };
@@ -116,11 +162,12 @@ fn frames(rows: &[Observation], cpu_only: bool) -> Result<Vec<Frame>, String> {
                 cpu_percent,
                 gpu_percent: r.gpu_percent.filter(|_| joint),
                 fan_percent,
+                second_fan_percent,
             },
         });
     }
     let (Some(first), Some(last)) = (frames.first(), frames.last()) else {
-        return Err("no complete readings for the selected dies and shared fan".into());
+        return Err("no complete temperature, load and fan readings".into());
     };
     if last.ms - first.ms < SESSION_SECS * 1000 - 4000 {
         return Err("45 minutes of complete calibration coverage required".into());
@@ -134,7 +181,7 @@ fn frames(rows: &[Observation], cpu_only: bool) -> Result<Vec<Frame>, String> {
         return Err("invalid sampling interval or measurement gap exceeding two ticks".into());
     }
     check_excitation(&frames)?;
-    Ok(frames)
+    Ok((frames, ids))
 }
 
 pub fn validate_session(rows: &[Observation], cpu_only: bool) -> Result<(), String> {
@@ -143,6 +190,13 @@ pub fn validate_session(rows: &[Observation], cpu_only: bool) -> Result<(), Stri
 
 fn check_excitation(frames: &[Frame]) -> Result<(), String> {
     let mut fan_levels = [0usize; 101];
+    let dual = frames[0].u.second_fan_percent.is_some();
+    let mut second_levels = [0usize; 101];
+    let mut pairs = if dual {
+        vec![[0usize; 101]; 101]
+    } else {
+        Vec::new()
+    };
     let mut cpu_levels = [0usize; 3];
     let mut gpu_levels = [0usize; 3];
     let mut crossed = [0usize; 2];
@@ -160,7 +214,13 @@ fn check_excitation(frames: &[Frame]) -> Result<(), String> {
         let u = frame.u;
         let cpu = band(u.cpu_percent);
         cpu_levels[cpu] += 1;
-        fan_levels[u.fan_percent.round() as usize] += 1;
+        let first = u.fan_percent.round() as usize;
+        fan_levels[first] += 1;
+        if let Some(second) = u.second_fan_percent {
+            let second = second.round() as usize;
+            second_levels[second] += 1;
+            pairs[first][second] += 1;
+        }
         if let Some(gpu) = u.gpu_percent.map(band) {
             gpu_levels[gpu] += 1;
             if cpu == 0 && gpu == 2 {
@@ -171,15 +231,25 @@ fn check_excitation(frames: &[Frame]) -> Result<(), String> {
             }
         }
     }
-    let mut levels = 0;
-    let mut next = 0;
-    for (p, &count) in fan_levels.iter().enumerate() {
-        if p >= next && count >= 3 {
-            levels += 1;
-            next = p + 5;
+    fn levels(counts: impl Iterator<Item = usize>) -> usize {
+        let mut levels = 0;
+        let mut next = 0;
+        for (p, count) in counts.enumerate() {
+            if p >= next && count >= 3 {
+                levels += 1;
+                next = p + 5;
+            }
         }
+        levels
     }
-    if levels < 4
+    if dual
+        && (levels(second_levels.into_iter()) < 4
+            || !pairs.iter().any(|row| levels(row.iter().copied()) >= 2)
+            || !(0..101).any(|j| levels(pairs.iter().map(|row| row[j])) >= 2))
+    {
+        return Err("insufficient independent fan excitation: each fan needs four measured levels and must vary while the other stays fixed".into());
+    }
+    if levels(fan_levels.into_iter()) < 4
         || cpu_levels.iter().any(|n| *n < 3)
         || (joint && gpu_levels.iter().chain(&crossed).any(|n| *n < 3))
     {
@@ -193,7 +263,7 @@ fn regression(frames: &[Frame], ticks: usize, half_life_s: Option<f64>) -> Fit {
     // exact for the discrete model even across load changes. It reduces the
     // influence of temperature quantization without filtering the readings.
     Fit::from_rows(frames.windows(ticks + 1).map(|block| {
-        let mut sum = [0.0; TERMS.len()];
+        let mut sum = [0.0; FEATURE_COUNT];
         let mut rates = [0.0; 2];
         let duration = (block[ticks].ms - block[0].ms) as f64 / 1000.0;
         for w in block.windows(2) {
@@ -240,6 +310,7 @@ fn sparse(fit: &Fit, terms: &[usize], die: usize, fraction: f64) -> Option<Coeff
             5 => Some(6),
             7 => Some(8),
             13 => Some(16),
+            17 => Some(20),
             _ => None,
         };
         let remove = square
@@ -249,12 +320,13 @@ fn sparse(fit: &Fit, terms: &[usize], die: usize, fraction: f64) -> Option<Coeff
     }
 }
 
-fn fit_model(fit: &Fit, joint: bool, fraction: f64) -> Option<ThermalModel> {
-    let terms = if joint { JOINT_TERMS } else { CPU_TERMS };
+fn fit_model(fit: &Fit, joint: bool, fan_ids: &[String], fraction: f64) -> Option<ThermalModel> {
+    let terms = candidate_terms(joint, fan_ids.len() == 2);
     Some(ThermalModel {
-        cpu: sparse(fit, terms, 0, fraction)?,
+        fan_ids: fan_ids.to_vec(),
+        cpu: sparse(fit, &terms, 0, fraction)?,
         gpu: if joint {
-            Some(sparse(fit, terms, 1, fraction)?)
+            Some(sparse(fit, &terms, 1, fraction)?)
         } else {
             None
         },
@@ -402,7 +474,7 @@ fn score(model: &ThermalModel, frames: &[Frame]) -> Option<Scores> {
 fn monotone(model: &ThermalModel, frames: &[Frame]) -> bool {
     // The instantaneous derivatives with respect to load and fan are affine.
     // Their extrema on the measured operating box occur at its corners.
-    let mut bounds = [[f64::INFINITY, f64::NEG_INFINITY]; 5];
+    let mut bounds = [[f64::INFINITY, f64::NEG_INFINITY]; 6];
     for a in frames {
         for (range, x) in bounds.iter_mut().zip([
             a.t.cpu,
@@ -410,18 +482,20 @@ fn monotone(model: &ThermalModel, frames: &[Frame]) -> bool {
             a.u.cpu_percent,
             a.u.gpu_percent.unwrap_or(0.0),
             a.u.fan_percent,
+            a.u.second_fan_percent.unwrap_or(0.0),
         ]) {
             range[0] = range[0].min(x);
             range[1] = range[1].max(x);
         }
     }
     for w in std::iter::once(&model.cpu).chain(model.gpu.as_ref()) {
-        for mask in 0..32 {
-            let [c, g, l, v, f] = std::array::from_fn(|i| bounds[i][(mask >> i) & 1]);
+        for mask in 0..64 {
+            let [c, g, l, v, f, f2] = std::array::from_fn(|i| bounds[i][(mask >> i) & 1]);
             let cpu = w[5] + 2.0 * w[6] * l + w[9] * c + w[11] * g;
             let gpu = w[7] + 2.0 * w[8] * v + w[10] * g + w[12] * c;
             let fan = w[13] + w[14] * c + w[15] * g + 2.0 * w[16] * f;
-            if cpu < -1e-8 || gpu < -1e-8 || fan > 1e-8 {
+            let second_fan = w[17] + w[18] * c + w[19] * g + 2.0 * w[20] * f2;
+            if cpu < -1e-8 || gpu < -1e-8 || fan > 1e-8 || second_fan > 1e-8 {
                 return false;
             }
         }
@@ -432,7 +506,7 @@ fn monotone(model: &ThermalModel, frames: &[Frame]) -> bool {
         let Some(reference) = model.forecast(frame.t, frame.u, 60.0) else {
             return false;
         };
-        for axis in 0..3 {
+        for axis in 0..4 {
             let mut u = frame.u;
             let input = match axis {
                 0 => &mut u.cpu_percent,
@@ -440,7 +514,11 @@ fn monotone(model: &ThermalModel, frames: &[Frame]) -> bool {
                     Some(value) => value,
                     None => continue,
                 },
-                _ => &mut u.fan_percent,
+                2 => &mut u.fan_percent,
+                _ => match &mut u.second_fan_percent {
+                    Some(f) => f,
+                    None => continue,
+                },
             };
             let range = bounds[axis + 2];
             let raised = (*input + 5.0).min(range[1]);
@@ -452,7 +530,7 @@ fn monotone(model: &ThermalModel, frames: &[Frame]) -> bool {
                 return false;
             };
             let ordered = |a: f64, b: f64| {
-                if axis == 2 {
+                if axis >= 2 {
                     b <= a + 1e-7
                 } else {
                     b >= a - 1e-7
@@ -471,18 +549,27 @@ fn monotone(model: &ThermalModel, frames: &[Frame]) -> bool {
     true
 }
 
-fn baseline(fit: &Fit, joint: bool, rc_only: bool) -> Option<ThermalModel> {
+fn baseline(fit: &Fit, joint: bool, fan_ids: &[String], rc_only: bool) -> Option<ThermalModel> {
     let arx: &[usize] = if joint {
         &[0, 1, 2, 5, 7, 13]
     } else {
         &[0, 1, 5, 13]
     };
-    let cpu_terms: &[usize] = if rc_only { &[0, 1, 5, 13, 14] } else { arx };
-    let gpu_terms: &[usize] = if rc_only { &[0, 2, 7, 13, 15] } else { arx };
+    let equation = |die, rc_terms: &[usize]| {
+        let mut terms = if rc_only { rc_terms } else { arx }.to_vec();
+        if fan_ids.len() == 2 {
+            terms.push(17);
+            if rc_only {
+                terms.push(18 + die);
+            }
+        }
+        fit.fit(&terms, die, true)
+    };
     Some(ThermalModel {
-        cpu: fit.fit(cpu_terms, 0, true)?,
+        fan_ids: fan_ids.to_vec(),
+        cpu: equation(0, &[0, 1, 5, 13, 14])?,
         gpu: if joint {
-            Some(fit.fit(gpu_terms, 1, true)?)
+            Some(equation(1, &[0, 2, 7, 13, 15])?)
         } else {
             None
         },
@@ -490,7 +577,7 @@ fn baseline(fit: &Fit, joint: bool, rc_only: bool) -> Option<ThermalModel> {
 }
 
 pub fn identify(rows: &[Observation], cpu_only: bool) -> Result<Report, String> {
-    let data = frames(rows, cpu_only)?;
+    let (data, fan_ids) = frames(rows, cpu_only)?;
     let n = data.len();
     let joint = data[0].t.gpu.is_some();
     let train_end = n * 4 / 5;
@@ -505,7 +592,7 @@ pub fn identify(rows: &[Observation], cpu_only: bool) -> Result<Report, String> 
         for (end, next) in [(n * 2 / 5, n * 3 / 5), (n * 3 / 5, train_end)] {
             let fit = regression(&data[..end], ticks, None);
             for (loss, &fraction) in losses.iter_mut().zip(&candidates) {
-                let Some(model) = fit_model(&fit, joint, fraction) else {
+                let Some(model) = fit_model(&fit, joint, &fan_ids, fraction) else {
                     *loss = f64::INFINITY;
                     continue;
                 };
@@ -538,14 +625,14 @@ pub fn identify(rows: &[Observation], cpu_only: bool) -> Result<Report, String> 
         .max_by(|a, b| a.1.total_cmp(&b.1).then_with(|| b.2.total_cmp(&a.2)))
         .unwrap();
     let fit = regression(train, ticks_per_equation, None);
-    let model =
-        fit_model(&fit, joint, threshold_fraction).ok_or("rank-deficient training session")?;
+    let model = fit_model(&fit, joint, &fan_ids, threshold_fraction)
+        .ok_or("rank-deficient training session")?;
     let sindy = score(&model, holdout).ok_or("model diverged on the unseen holdout")?;
     // Only out-of-fold errors prior to the final holdout determine the widths.
     let last_fold = n * 3 / 5;
     let fold_fit = regression(&data[..last_fold], ticks_per_equation, None);
-    let earlier =
-        fit_model(&fold_fit, joint, threshold_fraction).ok_or("rank-deficient calibration fold")?;
+    let earlier = fit_model(&fold_fit, joint, &fan_ids, threshold_fraction)
+        .ok_or("rank-deficient calibration fold")?;
     let residual_intervals_90 = [30, 60, 300]
         .into_iter()
         .filter_map(|s| {
@@ -554,14 +641,15 @@ pub fn identify(rows: &[Observation], cpu_only: bool) -> Result<Report, String> 
         .collect();
     let persistence = score(
         &ThermalModel {
-            cpu: [0.0; 17],
-            gpu: joint.then_some([0.0; 17]),
+            fan_ids: fan_ids.clone(),
+            cpu: [0.0; FEATURE_COUNT],
+            gpu: joint.then_some([0.0; FEATURE_COUNT]),
         },
         holdout,
     )
     .unwrap();
-    let arx = baseline(&fit, joint, false).and_then(|m| score(&m, holdout));
-    let rc = baseline(&fit, joint, true).and_then(|m| score(&m, holdout));
+    let arx = baseline(&fit, joint, &fan_ids, false).and_then(|m| score(&m, holdout));
+    let rc = baseline(&fit, joint, &fan_ids, true).and_then(|m| score(&m, holdout));
     let rls_half_life_s = (train.last().unwrap().ms - train[0].ms) as f64 / 2000.0;
     let weighted = regression(train, ticks_per_equation, Some(rls_half_life_s));
     let refit = |c: &Coefficients, die| {
@@ -575,21 +663,23 @@ pub fn identify(rows: &[Observation], cpu_only: bool) -> Result<Report, String> 
         } else {
             None
         };
-        score(&ThermalModel { cpu, gpu }, holdout)
+        score(
+            &ThermalModel {
+                cpu,
+                gpu,
+                fan_ids: fan_ids.clone(),
+            },
+            holdout,
+        )
     })();
     let monotone = monotone(&model, &data);
     let meets = |e: &Errors| e.rmse_1step < 1.5 && e.rmse_60s < 3.0;
+    let term_count = candidate_terms(joint, fan_ids.len() == 2).len();
     let sparse_outputs = std::iter::once(&model.cpu)
         .chain(model.gpu.as_ref())
         .all(|c| {
             let active = c.iter().filter(|v| **v != 0.0).count();
-            active > 0
-                && active
-                    < if joint {
-                        JOINT_TERMS.len()
-                    } else {
-                        CPU_TERMS.len()
-                    }
+            active > 0 && active < term_count
         });
     let accepted = monotone
         && sparse_outputs
@@ -603,7 +693,7 @@ pub fn identify(rows: &[Observation], cpu_only: bool) -> Result<Report, String> 
         holdout_samples: holdout.len(),
         threshold_fraction,
         ticks_per_equation,
-        terms: &TERMS,
+        terms: term_names(fan_ids.len() == 2),
         model,
         sindy,
         persistence,
@@ -625,7 +715,7 @@ mod tests {
     fn resolvable_quadratic_is_retained_without_a_spurious_linear_term() {
         let fit = Fit::from_rows((0..120).map(|i| {
             let load = (i % 91) as f64;
-            let mut x = [0.0; 17];
+            let mut x = [0.0; FEATURE_COUNT];
             x[0] = 1.0;
             x[5] = load;
             x[6] = load * load;
@@ -648,14 +738,16 @@ mod tests {
                 cpu_percent: load,
                 gpu_percent: Some(load),
                 fan_percent: load,
+                second_fan_percent: Some(100.0 - load),
             },
         });
         let zero = ThermalModel {
-            cpu: [0.0; 17],
-            gpu: Some([0.0; 17]),
+            fan_ids: vec!["a".into(), "b".into()],
+            cpu: [0.0; FEATURE_COUNT],
+            gpu: Some([0.0; FEATURE_COUNT]),
         };
         for die in 0..2 {
-            for (term, coefficient) in [(5, -0.001), (7, -0.001), (13, 0.001)] {
+            for (term, coefficient) in [(5, -0.001), (7, -0.001), (13, 0.001), (17, 0.001)] {
                 let mut bad = zero.clone();
                 let coefficients = if die == 0 {
                     &mut bad.cpu

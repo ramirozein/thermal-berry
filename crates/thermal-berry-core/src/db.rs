@@ -68,6 +68,10 @@ CREATE TABLE IF NOT EXISTS thermal_models (
     fitted_at_ms INTEGER NOT NULL, rmse_1step REAL NOT NULL, rmse_60s REAL NOT NULL,
     samples_used INTEGER NOT NULL, PRIMARY KEY (fitted_at_ms, die)
 );
+CREATE TABLE IF NOT EXISTS thermal_model_fans (
+    fitted_at_ms INTEGER NOT NULL, channel INTEGER NOT NULL, fan_id TEXT NOT NULL,
+    PRIMARY KEY (fitted_at_ms, channel)
+);
 ";
 
 fn db_err(e: impl std::fmt::Display) -> ThermalError {
@@ -366,6 +370,20 @@ impl Db {
                 "observation and raw readings must belong to the same tick",
             ));
         }
+        if let Some(o) = observation.filter(|o| !o.fans.is_empty()) {
+            if o.fans.len() != sample.fans.len()
+                || o.fans.iter().enumerate().any(|(i, f)| {
+                    o.fans[..i].iter().any(|previous| previous.id == f.id)
+                        || !sample.fans.iter().any(|raw| {
+                            raw.id == f.id
+                                && raw.rpm == f.rpm
+                                && raw.boost_percent.map(f64::from) == f.percent
+                        })
+                })
+            {
+                return Err(db_err("observed fan channels differ from the raw tick"));
+            }
+        }
         let connection = self.connection();
         let tx = connection.unchecked_transaction().map_err(db_err)?;
         {
@@ -438,7 +456,7 @@ impl Db {
          -> DbResult<()> {
             let mut terms = Vec::new();
             let mut values = Vec::new();
-            for (term, &value) in crate::model::TERMS.iter().zip(c) {
+            for (term, &value) in report.terms.iter().zip(c) {
                 if value != 0.0 {
                     terms.push(term);
                     values.push(value);
@@ -464,6 +482,10 @@ impl Db {
         if let (Some(c), Some(e)) = (&report.model.gpu, &report.sindy.gpu) {
             save("gpu", c, e)?;
         }
+        for (i, id) in report.model.fan_ids.iter().enumerate() {
+            tx.execute("INSERT INTO thermal_model_fans (fitted_at_ms, channel, fan_id) VALUES (?1, ?2, ?3)",
+                params![fitted, i as i64 + 1, id]).map_err(db_err)?;
+        }
         tx.commit().map_err(db_err)
     }
 
@@ -471,7 +493,11 @@ impl Db {
         let conn = self.connection();
         let mut statement = conn.prepare(
             "SELECT timestamp_ms, cpu_temp_c, gpu_temp_c, cpu_percent, gpu_percent, fan_percent,
-                    rpm, mode, mem_percent, gpu_mem_percent, gpu_power_w FROM load_readings
+                    rpm, mode, mem_percent, gpu_mem_percent, gpu_power_w,
+                    (SELECT json_group_array(json_object('id', fan_id, 'percent', boost_percent,
+                                                         'rpm', fr.rpm) ORDER BY fan_id)
+                     FROM fan_readings fr WHERE fr.timestamp_ms = load_readings.timestamp_ms)
+             FROM load_readings
              WHERE timestamp_ms BETWEEN ?1 AND ?2 ORDER BY timestamp_ms LIMIT ?3"
         ).map_err(db_err)?;
         let rows = statement
@@ -492,6 +518,13 @@ impl Db {
                         gpu_percent: r.get(4)?,
                         fan_percent: r.get(5)?,
                         rpm: r.get(6)?,
+                        fans: serde_json::from_str(&r.get::<_, String>(11)?).map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                11,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?,
                         mode: match mode.as_str() {
                             "manual" => Some(FanMode::Manual),
                             "disabled" => Some(FanMode::Disabled),
@@ -854,6 +887,7 @@ mod predictive_storage_tests {
             errors: vec![],
         };
         let o = Observation {
+            fans: vec![],
             timestamp_ms: sample.timestamp_ms,
             mode: Some(FanMode::Manual),
             cpu_temp_c: Some(42.0),

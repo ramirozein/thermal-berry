@@ -116,7 +116,7 @@ jobs:
         run: |
           bun run build
           cargo test --locked --workspace
-          bash tests/signed-release.sh
+          bash release/tests/signed-release.sh
 
       - name: Build Linux packages
         if: matrix.platform == 'linux'
@@ -125,7 +125,7 @@ jobs:
           THERMAL_BERRY_RELEASE_FINGERPRINT: ${{ vars.THERMAL_BERRY_RELEASE_FINGERPRINT }}
         run: |
           if [[ -n "$THERMAL_BERRY_RELEASE_PUBLIC_KEY" ]]; then
-            THERMAL_BERRY_RELEASE_PUBLIC_KEY=$(bash scripts/sign-release.sh --public-key)
+            THERMAL_BERRY_RELEASE_PUBLIC_KEY=$(bash release/sign-release.sh --public-key)
             export THERMAL_BERRY_RELEASE_PUBLIC_KEY
           fi
           bun run tauri build -- --locked
@@ -187,7 +187,7 @@ jobs:
           THERMAL_BERRY_RELEASE_PUBLIC_KEY: ${{ vars.THERMAL_BERRY_RELEASE_PUBLIC_KEY }}
           THERMAL_BERRY_RELEASE_FINGERPRINT: ${{ vars.THERMAL_BERRY_RELEASE_FINGERPRINT }}
           THERMAL_BERRY_RELEASE_SIGNING_KEY: ${{ secrets.THERMAL_BERRY_RELEASE_SIGNING_KEY }}
-        run: bash scripts/sign-release.sh "v$VERSION"
+        run: bash release/sign-release.sh "v$VERSION"
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa
         with:
           path: pages

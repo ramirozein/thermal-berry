@@ -1,4 +1,3 @@
-//! Read-only measurements for the single supported GPU in a session.
 mod amd;
 #[cfg(feature = "nvidia")]
 mod nvidia;
@@ -24,7 +23,6 @@ impl Gpu {
         let amd = amd::discover(Path::new("/sys/class/drm"));
         #[cfg(feature = "nvidia")]
         let nvidia = nvidia::Nvml::open();
-        // Several candidates cannot be joined to a single die without a mapping.
         #[cfg(feature = "nvidia")]
         if let Some(nvidia) = nvidia {
             match nvidia.count() {

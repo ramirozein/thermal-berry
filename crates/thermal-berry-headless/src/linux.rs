@@ -56,24 +56,27 @@ pub fn calibrate(cpu_only: bool, check_only: bool) -> Result<()> {
         let (sample, observation) = calibration::probe(device.as_ref());
         let joint =
             observation.gpu_percent.is_some() && observation.gpu_temp_c.is_some() && !cpu_only;
-        let access = device
+        let channels = device
             .as_ref()
             .ok_or("no supported thermal device".to_string())
             .and_then(|device| {
-                calibration::shared_fan(device.as_ref())
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
+                calibration::controllable_fans(device.as_ref()).map_err(|e| e.to_string())
             });
-        let fan_error = access.err();
-        let reading_error = calibration::safe_reading(&sample, &observation, !joint).err();
-        let ready = fan_error.is_none() && reading_error.is_none();
+        let reading = channels
+            .as_ref()
+            .ok()
+            .map(|fans| calibration::preflight(fans, &sample, &observation, !joint))
+            .transpose();
+        let ready = matches!(reading, Ok(Some(_)));
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "scope": if joint {"cpu+gpu"} else {"cpu-only"},
                 "ready": ready,
-                "fan_preflight_error": fan_error,
-                "reading_error": reading_error.map(|e| e.to_string()),
+                "fan_topology": match sample.fans.len() { 1 => "single", 2 => "dual", _ => "unsupported" },
+                "spin_up_required": reading.as_ref().ok().and_then(Option::as_ref),
+                "fan_preflight_error": channels.err(),
+                "reading_error": reading.err().map(|e| e.to_string()),
                 "sample": sample,
                 "observation": observation
             }))?
@@ -85,7 +88,7 @@ pub fn calibrate(cpu_only: bool, check_only: bool) -> Result<()> {
         };
     }
     let device = device.ok_or("no supported thermal device")?;
-    calibration::shared_fan(device.as_ref())?;
+    calibration::controllable_fans(device.as_ref())?;
     let retention_ms = u64::from(config.retention_days()) * 24 * 3600 * 1000;
     db.purge_older_than(thermal_berry_core::readings::now_ms().saturating_sub(retention_ms))?;
     // SAFETY: the handler only sets an atomic flag. Cleanup runs on the normal thread.
@@ -103,10 +106,16 @@ pub fn calibrate(cpu_only: bool, check_only: bool) -> Result<()> {
         cpu_only,
         || !STOP.load(Ordering::Relaxed) && matches!(inhibitor.0.try_wait(), Ok(None)),
         |stage| match stage {
-            Some(stage) => eprintln!(
-                "CPU {}%, GPU {}%, fan {}%",
-                stage.cpu_percent, stage.gpu_percent, stage.fan_percent
-            ),
+            Some(stage) => {
+                let second = stage
+                    .second_fan_percent
+                    .map(|p| format!(", F2 {p}%"))
+                    .unwrap_or_default();
+                eprintln!(
+                    "CPU {}%, GPU {}%, F1 {}%{second}",
+                    stage.cpu_percent, stage.gpu_percent, stage.fan_percent
+                );
+            }
             None => eprintln!("Stop calibration workloads"),
         },
     )?;

@@ -100,11 +100,7 @@ impl PendingLoads {
             })
             .map(|t| f64::from(t.celsius))
             .reduce(f64::max);
-        let fan = match &sample.fans[..] {
-            [fan] => Some(fan),
-            _ => None,
-        };
-        Observation {
+        let mut observation = Observation {
             timestamp_ms: sample.timestamp_ms,
             cpu_temp_c: cpu_temp,
             gpu_temp_c: gpu.celsius.or_else(|| {
@@ -123,14 +119,17 @@ impl PendingLoads {
             }),
             cpu_percent: load.cpu_percent.flatten().map(f64::from),
             gpu_percent: gpu.percent,
-            fan_percent: fan.and_then(|f| f.boost_percent).map(f64::from),
-            rpm: fan.and_then(|f| f.rpm),
+            fan_percent: None,
+            rpm: None,
+            fans: Vec::new(),
             mode,
             mem_percent: (load.total_bytes > 0 && load.used_bytes <= load.total_bytes)
                 .then(|| 100.0 * load.used_bytes as f64 / load.total_bytes as f64),
             gpu_mem_percent: gpu.memory_percent,
             gpu_power_w: gpu.power_w,
-        }
+        };
+        observation.set_fans(&sample.fans);
+        observation
     }
 }
 

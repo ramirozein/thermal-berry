@@ -106,7 +106,6 @@ impl Nvml {
 
 impl Drop for Nvml {
     fn drop(&mut self) {
-        // SAFETY: open initialized NVML once and library is still alive.
         unsafe {
             (self.shutdown)();
         }

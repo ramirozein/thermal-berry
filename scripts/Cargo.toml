@@ -1,0 +1,22 @@
+[package]
+name = "thermal-berry-tauri-runner"
+version = "0.1.0"
+edition = "2021"
+publish = false
+default-run = "thermal-berry-tauri-runner"
+
+[[bin]]
+name = "thermal-berry-tauri-runner"
+path = "tauri.rs"
+
+[[bin]]
+name = "bump-version"
+path = "bump-version.rs"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+signal-hook = { version = "0.3", default-features = false }
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }

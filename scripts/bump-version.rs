@@ -20,7 +20,7 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.len() != 1 || !valid_version(&args[0]) {
-        return Err("Usage: bump-version MAJOR.MINOR.PATCH (e.g. 1.2.0)".into());
+        return Err("Usage: bun run update-version MAJOR.MINOR.PATCH (e.g. 1.2.0)".into());
     }
     let version = &args[0];
 
@@ -110,6 +110,3 @@ fn version_range(content: &str, path: &str) -> Result<Range<usize>, String> {
     }
     Ok(ranges.remove(0))
 }
-
-
-// rustc scripts/bump-version.rs -o /tmp/thermal-berry-bump-version && /tmp/thermal-berry-bump-version 1.3.0
